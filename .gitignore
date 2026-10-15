@@ -1,0 +1,27 @@
+# Python environments and tooling
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp/
+.ruff_cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Local datasets and download artifacts
+data/*
+!data/.gitkeep
+data/**/*.tar.gz
+
+# Generated experiments and future model artifacts
+outputs/*
+!outputs/.gitkeep
+checkpoints/
+models/
+*.safetensors
+*.pt
+*.pth
