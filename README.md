@@ -2,62 +2,65 @@
 
 ARGUS (Adversarial Retrieval and Grounded Understanding System) is an SMU IS469 research project investigating whether adversarial multi-agent RAG improves scientific claim verification over standard and single-agent RAG.
 
-This milestone establishes the reproducible SciFact data pipeline only. It does not implement retrieval, embeddings, agents, LLM calls, fine-tuning, APIs, or a frontend.
+Milestone 2 provides the shared, reproducible scientific-evidence retrieval foundation. It does not implement LLM verdict generation, agents, fine-tuning, APIs, or a frontend.
 
-## Planned comparisons
+## Retrieval backends
 
-- **A — Standard RAG:** retrieve once, then produce an evidence-grounded verdict.
-- **B — Single-agent RAG:** iteratively retrieve, rewrite queries, inspect evidence, and stop conditionally.
-- **C — ARGUS:** Support and Challenge agents, followed by an Evidence Verifier and Judge; a Challenge-agent ablation is planned.
-- **D — ARGUS + LoRA/QLoRA:** optional fine-tuned evidence verifier.
+Each SciFact title plus its complete ordered abstract is one searchable document. This preserves original document IDs, titles, sentence order, and provenance while keeping document-level evidence evaluation straightforward. Abstracts are not chunked in this milestone.
 
-The present stack is Python 3.12, uv, pytest, Ruff, and the standard library. Planned later components include BM25, dense retrieval, FAISS, LangGraph, and optional Hugging Face tooling.
+- **BM25:** `rank-bm25` `BM25Okapi` with a lowercase deterministic regex tokenizer. It is a fast lexical baseline.
+- **Dense:** `BAAI/bge-small-en-v1.5` at revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a` embeds documents and claims on CPU. Normalized float32 vectors are searched exactly with `faiss.IndexFlatIP`, so the score is cosine similarity. Claims receive BGE's retrieval query prefix; documents do not.
+- **Hybrid:** BM25 and dense candidate rankings are fused with Reciprocal Rank Fusion (RRF), not raw-score addition. The fixed defaults are a top-50 candidate pool and `c=60`.
 
-## Prerequisites and installation (Windows CMD)
+All backends expose `retrieve(query, k)` and return ranked `RetrievalResult` records containing the source document and its original ID. Empty queries and nonpositive `k` return no results; requests larger than the corpus are safely capped.
 
-Install Python 3.12 and [uv](https://docs.astral.sh/uv/), then from the repository root run:
+## Setup
+
+ARGUS targets Python 3.12 on Windows and uses `uv`. Dense retrieval is CPU-compatible, but the initial model download and corpus embedding are materially slower than BM25.
 
 ```cmd
 uv sync
 ```
 
-`uv` creates the local environment, resolves the development tools, and uses the committed `uv.lock` for reproducibility.
-
 ## SciFact data
 
-ARGUS uses the original [AllenAI SciFact repository](https://github.com/allenai/scifact), its [official data schema](https://github.com/allenai/scifact/blob/master/doc/data.md), and the official archive:
-
-```text
-https://scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz
-```
-
-Download and safely extract the archive into `data/scifact/`:
+ARGUS uses the original [AllenAI SciFact repository](https://github.com/allenai/scifact), its [official data schema](https://github.com/allenai/scifact/blob/master/doc/data.md), and the official archive. Download it once into the ignored local directory:
 
 ```cmd
 uv run python scripts/download_scifact.py
+uv run python scripts/inspect_scifact.py
 ```
 
-The script does not re-download a valid existing dataset. It writes `data/scifact/PROVENANCE.json` with the source URL, UTC download time, and SHA-256 of the downloaded archive. The source URL intentionally points to `latest`, so it is not an immutable dataset version; retain that provenance file for a particular experimental run. Raw data and archives are ignored by Git.
+Expected data are 5,183 corpus abstracts, 809 training claims, 300 labeled development claims, and 300 unlabeled test claims. The labeled official development set remains reserved for later end-to-end evaluation; this retrieval benchmark does not use its labels for selection or tuning.
 
-Expected original JSONL files and split roles are:
-
-| File | Expected records | Intended use |
-| --- | ---: | --- |
-| `corpus.jsonl` | 5,183 abstracts | Retrieval corpus for all experiments |
-| `claims_train.jsonl` | 809 claims | Future development/training only |
-| `claims_dev.jsonl` | 300 claims | Final evaluation; do not use its labels for tuning |
-| `claims_test.jsonl` | 300 claims | Unlabeled held-out claims |
-
-The loader preserves document and claim IDs, ordered abstract sentences, all evidence documents, and all rationale annotations. An empty training/development evidence mapping means no annotated evidence for that claim; it does not prove that no relevant scientific evidence exists. The test split is represented as unlabeled, never with fabricated labels.
-
-## Inspect and validate data
+## Run the benchmark
 
 ```cmd
-uv run python scripts/inspect_scifact.py
-uv run python scripts/inspect_scifact.py --data-dir data\scifact
+uv run python scripts/benchmark_retrieval.py --methods bm25 dense hybrid --k 3 5 10 --seed 42
 ```
 
-The inspection command checks official split sizes, IDs, references, labels, and rationale sentence indices. Its routine statistics intentionally use the training split only, not development-set label distributions.
+Useful options are `--rebuild-cache`, `--batch-size 32`, `--cache-dir data/retrieval_cache`, and `--output-dir outputs/retrieval`. Run just the lexical baseline without downloading a model:
+
+```cmd
+uv run python scripts/benchmark_retrieval.py --methods bm25
+```
+
+Dense corpus embeddings are cached as a NumPy matrix plus JSON metadata in `data/retrieval_cache/` (ignored by Git). Cache compatibility checks include the corpus content fingerprint and ordered IDs, pinned model revision, query prefix, normalization, dtype, sequence limit, and cache schema. The original SciFact corpus remains authoritative for document metadata. To intentionally update the model, replace the single `DEFAULT_MODEL_REVISION` commit SHA in `src/argus/retrieval/dense.py` and rebuild the cache with `--rebuild-cache`.
+
+The benchmark measures the number of input tokens versus the model's configured maximum sequence length and saves the count of documents that are truncated. It does not add chunking merely to avoid those truncations.
+
+## Evaluation design
+
+The 809 official training claims are deterministically split into approximately 80/20 internal-development/internal-validation subsets with seed 42. Claims are sorted by stable ID before seeded selection and stratified into support-only, contradict-only, mixed, and no-evidence categories. The full 5,183-document corpus remains searchable for every method.
+
+For evidence-bearing validation claims, the benchmark reports:
+
+- `Recall@k`: unique annotated gold documents in the top `k`, divided by unique annotated gold documents for that claim, averaged across eligible claims.
+- `Hit@k`: whether any annotated gold document occurs in the top `k`, averaged across eligible claims.
+
+Claims without annotated evidence are excluded from both denominators. This does not mean every retrieved non-gold abstract is false or irrelevant. Retrieval latency is measured after a warm call and includes dense query encoding plus FAISS search; document embedding/index construction is reported separately.
+
+Each run creates an ignored timestamped directory under `outputs/retrieval/` containing `metrics.json`, `metadata.json`, method-specific per-claim JSONL rankings, and (when all three backends run) selected qualitative success/failure examples. Gold IDs occur only in these evaluation outputs, never in queries, indexes, or rankings.
 
 ## Quality checks
 
@@ -65,23 +68,9 @@ The inspection command checks official split sizes, IDs, references, labels, and
 uv run pytest -v
 uv run ruff check .
 uv run ruff format --check .
+uv run python scripts/inspect_scifact.py
 ```
 
-## Repository layout
+## Limitations and next milestone
 
-```text
-configs/                 Future experiment configuration files
-data/scifact/            Local official SciFact JSONL files (Git-ignored)
-scripts/                 Dataset acquisition and inspection commands
-src/argus/data/          SciFact models, loading, and validation
-tests/                   Fast synthetic-fixture tests
-outputs/                 Generated experiment artifacts (Git-ignored)
-```
-
-Future `src/argus/retrieval`, `agents`, `verifier`, and `evaluation` modules will be added only when their implementations begin.
-
-## Status and next milestone
-
-Implemented: project tooling, safe official-data acquisition, lossless SciFact loading, dataset validation, inspection, and automated tests.
-
-Next: benchmark BM25 and dense retrieval over the corpus, reporting Recall@k before adding RAG or agent orchestration.
+This is a document-retrieval comparison on a modest internal validation subset, not a claim-verification result. SciFact annotations are not exhaustive relevance judgments; BGE input truncation and CPU model inference are practical trade-offs; and cache reproducibility depends on recording the chosen model identifier/revision. The next milestone is a Standard RAG baseline using the selected shared retrieval backend.
