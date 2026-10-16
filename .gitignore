@@ -20,6 +20,7 @@ data/**/*.tar.gz
 # Generated experiments and future model artifacts
 outputs/*
 !outputs/.gitkeep
+data/retrieval_cache/
 checkpoints/
 models/
 *.safetensors
