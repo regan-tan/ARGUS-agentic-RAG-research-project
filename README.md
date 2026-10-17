@@ -2,7 +2,9 @@
 
 ARGUS (Adversarial Retrieval and Grounded Understanding System) is an SMU IS469 research project investigating whether adversarial multi-agent RAG improves scientific claim verification over standard and single-agent RAG.
 
-Milestone 2 provides the shared, reproducible scientific-evidence retrieval foundation. It does not implement LLM verdict generation, agents, fine-tuning, APIs, or a frontend.
+Milestone 3 adds the reproducible Standard RAG baseline: one dense retrieval over SciFact, one local
+Qwen inference call, and strict structured-output/citation validation. It does not implement agents,
+iterative retrieval, fine-tuning, APIs, or a frontend.
 
 ## Retrieval backends
 
@@ -71,6 +73,81 @@ uv run ruff format --check .
 uv run python scripts/inspect_scifact.py
 ```
 
+## Standard RAG baseline
+
+The Standard RAG path is deliberately non-agentic:
+
+```text
+claim -> one dense BGE/FAISS retrieval (k=5) -> one Qwen/Ollama call -> validation
+```
+
+It uses the local Ollama tag `qwen3:4b-instruct-2507-q4_K_M`, the Q4_K_M hardware-oriented
+quantization of `Qwen/Qwen3-4B-Instruct-2507`. The quantized local model is recorded with its
+available Ollama digest and runtime version in each run's metadata; it is not claimed to be
+numerically identical to the BF16 checkpoint. Default decoding is fixed at temperature 0, top-k 40,
+512 generated tokens, and an 8,192-token context window. The application passes complete original
+abstracts for all five retrieved documents without evidence-text truncation.
+
+The local Ollama version used here does not expose a standalone tokenizer endpoint. After each call,
+ARGUS records Ollama's measured prompt-token count and rejects a result if it reaches the configured
+context window, rather than accepting a potentially truncated-evidence verdict. This is a conservative
+overflow guard; it does not truncate abstracts or issue an additional model call.
+
+Install and start Ollama separately, then check the exact local tag before running:
+
+```cmd
+ollama list
+uv run python scripts/run_standard_rag.py --claim "Example scientific claim"
+```
+
+The command verifies the local service and exact model tag before loading data. A successful result
+contains one of `SUPPORT`, `CONTRADICT`, or `INSUFFICIENT`, a concise rationale, and citations of the
+form `{"doc_id": 123, "sentence_indices": [0, 2]}`. IDs must be among the retrieved documents and
+sentence indices are zero-based. A structurally valid citation only establishes that the sentence
+exists; it is not by itself proof of scientific support.
+
+Run the deterministic, label-stratified five-claim smoke test (selected from the existing seed-42
+internal validation subset without using model predictions):
+
+```cmd
+uv run python scripts/run_standard_rag.py --smoke-test
+```
+
+Run a small controlled partial evaluation or the entire 162-claim internal validation set explicitly:
+
+```cmd
+uv run python scripts/run_standard_rag.py --evaluate --limit 5
+uv run python scripts/run_standard_rag.py --evaluate
+```
+
+Evaluation predictions are append-only, flushed to disk after each completed claim, and new runs
+never overwrite an older experiment. If an evaluation is interrupted, resume its exact run directory:
+
+```cmd
+uv run python scripts/run_standard_rag.py --evaluate --resume outputs/rag/<run-id>
+```
+
+Resume is rejected unless the model digest, generation settings, prompt hash, retrieval configuration,
+validation seed, and selected claim IDs exactly match. Existing success and failure records are both
+preserved and never rerun automatically; this avoids duplicate predictions and prevents silently
+discarding failed attempts. Artifact metadata exposes run status and completed/remaining claim IDs;
+partial-run metrics cover only persisted attempts and report coverage separately.
+
+Every run writes a new ignored directory under `outputs/rag/` containing incrementally written
+per-claim predictions, aggregate accuracy/macro-F1/per-class metrics, a confusion matrix, citation
+overlap statistics, failure counts, measured latency/token usage, and reproducibility metadata.
+Malformed output, invalid citations, retrieval errors, and inference errors are retained as failures;
+they are never converted into `INSUFFICIENT`. The internal split is for development only; the official
+300-claim development set remains reserved for final evaluation.
+
+The preserved historical retrieval results are summarized in
+[`reports/retrieval/milestone2-summary.md`](reports/retrieval/milestone2-summary.md).
+
 ## Limitations and next milestone
 
-This is a document-retrieval comparison on a modest internal validation subset, not a claim-verification result. SciFact annotations are not exhaustive relevance judgments; BGE input truncation and CPU model inference are practical trade-offs; and cache reproducibility depends on recording the chosen model identifier/revision. The next milestone is a Standard RAG baseline using the selected shared retrieval backend.
+CPU-only Qwen inference can be slow, local quantization can affect output, a fixed context window can
+become limiting for unusually long retrieved evidence, and retrieval misses remain an upper bound on
+grounded verdict quality. SciFact's evidence annotations are benchmark labels rather than exhaustive
+scientific truth. Temperature zero and pinned settings improve reproducibility but do not guarantee
+identical output across Ollama/runtime/hardware versions. The next milestone is Single-agent
+Iterative RAG, which must be evaluated against this one-pass baseline rather than altering it.
