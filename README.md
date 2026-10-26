@@ -228,6 +228,73 @@ RAG is made until both are evaluated on the same full claim set.
 
 ## Limitations and next milestone
 
+## Experiment 3: ARGUS Support/Challenge verification
+
+Experiment 3 adds a bounded LangGraph workflow for comparing full ARGUS with a controlled
+no-Challenge ablation. It keeps the SciFact corpus, pinned dense BGE/FAISS retriever, Qwen/Ollama
+model, seed-42 internal validation IDs, and failure-aware claim metrics used by the earlier runs.
+
+```text
+claim -> deterministic retrieval objective -> Support retrieval -> Challenge retrieval
+      -> provenance-preserving merge -> independent per-document verifier -> Judge verdict
+```
+
+The verifier receives the claim and one complete abstract, but never the Support/Challenge source.
+The judge receives only independently verified evidence and must pass the existing structured
+citation validator. Retrieved papers are treated as untrusted data throughout. Evidence is merged
+by original SciFact document ID, retaining `discovered_by` provenance for documents found by both
+agents. The deterministic Challenge query explicitly targets exceptions, limitations, conflicting
+findings, and alternative outcomes; it does not itself label a document as contradicting.
+
+The checked-in [`configs/argus-v1.json`](configs/argus-v1.json) records conservative defaults for
+the 8,192-token context window. Complete abstracts are never application-truncated. Ollama calls
+reported at or above the configured context window are rejected, as are malformed verifier output,
+out-of-range verifier citations, malformed judge output, and judge citations outside the verified
+document set. These conditions remain recorded failures rather than being converted to an
+`INSUFFICIENT` verdict.
+
+After preparing the local dataset, BGE cache, and Ollama model, run a single claim or a controlled
+partial/full seed-42 evaluation:
+
+```cmd
+uv run python scripts/run_argus.py --claim "Example scientific claim"
+uv run python scripts/run_argus.py --smoke-test
+uv run python scripts/run_argus.py --smoke-test --no-challenge
+uv run python scripts/run_argus.py --evaluate --limit 5
+uv run python scripts/run_argus.py --evaluate
+uv run python scripts/run_argus.py --evaluate --no-challenge
+```
+
+`--smoke-test` always selects five label-stratified claims from the seed-42 train-derived
+development pool, explicitly excluding all frozen 162 internal-validation claim IDs. It is the
+only multi-claim command intended for real-model preflight before the controlled evaluation.
+
+Evaluation predictions are append-only and fsync after every claim. Resume only the exact run
+directory; the command validates the selected IDs, seed, ARGUS variant, model digest and decoding
+settings, retriever/corpus fingerprint, agent budgets, and prompt hashes before accepting it:
+
+```cmd
+uv run python scripts/run_argus.py --evaluate --resume outputs/argus/<run-id>
+```
+
+Completed successes and failures are never rerun. Duplicate claim IDs and incompatible metadata are
+rejected. A single unterminated final JSONL fragment (for example, from an abrupt process exit) is
+ignored safely; any earlier malformed line is treated as corrupt and stops resume. `metrics.json` is
+recomputed from the authoritative saved rows after a completion or interruption.
+
+In addition to the unchanged failure-aware claim and citation metrics, ARGUS records post-inference
+gold-document recall/hit rate after Support retrieval and after all agent retrieval, unique Challenge
+documents and unique Challenge gold documents, verifier-label counts, merged-provenance counts,
+per-agent retrieval calls, per-component LLM calls/tokens/latency, and failure categories. These
+gold-based measurements are evaluation-only: neither retrieval agents, verifier nor Judge receive
+gold labels or annotations. Verifier classification is currently whole-abstract with sentence
+citations, not a sentence-rationale classifier; this limitation must be reported with the A40 run.
+
+Each invocation creates a new ignored `outputs/argus/<UTC-run-id>/` directory with metadata,
+per-claim traces/predictions, and evaluation metrics. Full GPU execution remains an explicit
+cluster run: configure the existing Ollama endpoint and exact local Qwen tag on the A40, then use
+the final command above for each variant. No GPU experiment is run by these repository checks.
+
 CPU-only Qwen inference can be slow, local quantization can affect output, a fixed context window can
 become limiting for unusually long retrieved evidence, and retrieval misses remain an upper bound on
 grounded verdict quality. SciFact's evidence annotations are benchmark labels rather than exhaustive
