@@ -116,6 +116,7 @@ def main() -> int:
     agent = ArgusAgent(retriever, client, config)
     metadata = {
         "experiment": "Experiment 3 ARGUS",
+        "implementation_version": "argus-v3",
         "variant": "full" if config.challenge_enabled else "no_challenge",
         "seed": args.seed,
         "agent": config.to_dict(),
@@ -172,7 +173,8 @@ def main() -> int:
         evaluation_mode = "partial_internal_validation" if args.limit else "internal_validation"
     claim_ids = [claim.claim_id for claim in selected]
     expected_configuration = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "implementation_version": "argus-v3",
         "variant": metadata["variant"],
         "evaluation": {
             "mode": evaluation_mode,

@@ -15,6 +15,8 @@ from argus.agents.argus import (
     VERIFIER_SYSTEM_PROMPT,
     ArgusAgent,
     ArgusConfig,
+    ArgusResult,
+    _parse_verification,
     evaluate_argus_attempts,
     judge_json_schema,
     merge_evidence,
@@ -41,20 +43,26 @@ class RetrieverStub:
         return (item(1),) if len(self.queries) == 1 else (item(1), item(2))
 
 
+class EmptyRetrieverStub:
+    def retrieve(self, query: str, k: int) -> tuple[RetrievalResult, ...]:
+        return ()
+
+
 class GeneratorStub:
-    def __init__(self, responses: list[dict[str, object]]) -> None:
+    def __init__(self, responses: list[object]) -> None:
         self.responses = iter(responses)
         self.users: list[str] = []
 
     def chat(self, *, system: str, user: str, response_schema: object) -> OllamaChatResponse:
         self.users.append(user)
+        response = next(self.responses)
         return OllamaChatResponse(
-            json.dumps(next(self.responses)),
+            response if isinstance(response, str) else json.dumps(response),
             GenerationMetadata(10, 5, None, None, None, None, 0.01),
         )
 
 
-def test_argus_v2_schemas_bound_rationales_without_mutating_standard_rag_schema() -> None:
+def test_argus_v3_schemas_bound_rationales_without_mutating_standard_rag_schema() -> None:
     verifier_schema = verifier_json_schema()
     judge_schema = judge_json_schema()
 
@@ -65,13 +73,14 @@ def test_argus_v2_schemas_bound_rationales_without_mutating_standard_rag_schema(
     assert "maxLength" not in response_json_schema()["properties"]["rationale"]
 
 
-def test_argus_v2_prompts_and_fingerprints_record_concise_reasoning() -> None:
-    assert PROMPT_VERSION == "argus-v2"
+def test_argus_v3_prompts_and_fingerprints_record_citation_requirement() -> None:
+    assert PROMPT_VERSION == "argus-v3"
     assert CONCISE_REASONING_INSTRUCTION in VERIFIER_SYSTEM_PROMPT
     assert CONCISE_REASONING_INSTRUCTION in JUDGE_SYSTEM_PROMPT
+    assert "Do not return SUPPORT or CONTRADICT with an empty" in VERIFIER_SYSTEM_PROMPT
     fingerprints = prompt_fingerprints()
-    assert fingerprints["evidence_verifier"]["version"] == "argus-v2"
-    assert fingerprints["judge"]["version"] == "argus-v2"
+    assert fingerprints["evidence_verifier"]["version"] == "argus-v3"
+    assert fingerprints["judge"]["version"] == "argus-v3"
     assert (
         fingerprints["evidence_verifier"]["system_prompt_sha256"]
         != fingerprints["judge"]["system_prompt_sha256"]
@@ -122,21 +131,120 @@ def test_no_challenge_performs_no_challenge_retrieval_or_inference() -> None:
     assert all(event.get("agent") != "challenge" for event in result.trace)
 
 
+def test_no_retrieved_abstracts_are_distinct_from_invalid_verifier_responses() -> None:
+    generator = GeneratorStub([])
+    result = ArgusAgent(
+        EmptyRetrieverStub(), generator, ArgusConfig(challenge_enabled=False)
+    ).verify("claim")
+
+    assert result.status == "retrieval_failure"
+    assert result.failure_message == "no abstracts were retrieved for evidence verification"
+    assert not generator.users
+    assert result.trace[-1]["outcome"] == "no_abstracts_retrieved"
+
+
 @pytest.mark.parametrize(
-    "verification, status",
+    "payload, valid",
     [
-        ({"label": "SUPPORT", "rationale": "x", "sentence_indices": []}, "invalid_response"),
-        ({"label": "SUPPORT", "rationale": "x", "sentence_indices": [9]}, "invalid_response"),
+        ({"label": "SUPPORT", "rationale": "x", "sentence_indices": []}, False),
+        ({"label": "CONTRADICT", "rationale": "x", "sentence_indices": []}, False),
+        ({"label": "INSUFFICIENT", "rationale": "x", "sentence_indices": []}, True),
+        ({"label": "SUPPORT", "rationale": "x", "sentence_indices": [0]}, True),
+        ({"label": "CONTRADICT", "rationale": "x", "sentence_indices": [0]}, True),
     ],
 )
-def test_invalid_verifier_citations_are_recorded_as_failures(
-    verification: dict[str, object], status: str
-) -> None:
-    result = ArgusAgent(
-        RetrieverStub(), GeneratorStub([verification]), ArgusConfig(challenge_enabled=False)
-    ).verify("claim")
-    assert result.status == status
+def test_verifier_citation_rules_remain_strict(payload: dict[str, object], valid: bool) -> None:
+    raw = json.dumps(payload)
+    evidence = merge_evidence((item(1),), (), 1)[0]
+    if valid:
+        assert _parse_verification(raw, evidence)[0] == payload["label"]
+    else:
+        with pytest.raises(ValueError, match="require a cited sentence"):
+            _parse_verification(raw, evidence)
+
+
+def test_invalid_verifier_document_is_excluded_and_valid_document_reaches_judge() -> None:
+    generator = GeneratorStub(
+        [
+            {"label": "SUPPORT", "rationale": "x", "sentence_indices": []},
+            {"label": "CONTRADICT", "rationale": "Direct.", "sentence_indices": [0]},
+            {
+                "verdict": "CONTRADICT",
+                "rationale": "Grounded.",
+                "evidence": [{"doc_id": 2, "sentence_indices": [0]}],
+            },
+        ]
+    )
+    result = ArgusAgent(RetrieverStub(), generator).verify("claim", claim_id=9)
+
+    assert result.status == "success"
+    assert [item.evidence.result.doc_id for item in result.verified_evidence] == [2]
+    verifier_events = [
+        event for event in result.trace if event.get("purpose") == "evidence_verifier"
+    ]
+    assert [
+        (event["doc_id"], event["validation_status"], event["admitted"])
+        for event in verifier_events
+    ] == [
+        (1, "invalid", False),
+        (2, "valid", True),
+    ]
+    assert verifier_events[0]["raw_response"]
+    assert "Document ID: 2" in generator.users[-1]
+    assert "Document ID: 1" not in generator.users[-1]
+    assert result.llm_calls == 3
+
+
+def test_valid_verifier_document_survives_a_later_invalid_document() -> None:
+    generator = GeneratorStub(
+        [
+            {"label": "SUPPORT", "rationale": "Direct.", "sentence_indices": [0]},
+            {"label": "CONTRADICT", "rationale": "x", "sentence_indices": []},
+            {
+                "verdict": "SUPPORT",
+                "rationale": "Grounded.",
+                "evidence": [{"doc_id": 1, "sentence_indices": [0]}],
+            },
+        ]
+    )
+    result = ArgusAgent(RetrieverStub(), generator).verify("claim")
+
+    assert result.status == "success"
+    assert [item.evidence.result.doc_id for item in result.verified_evidence] == [1]
+    assert "Document ID: 1" in generator.users[-1]
+    assert "Document ID: 2" not in generator.users[-1]
+
+
+def test_all_invalid_verifier_responses_fail_without_calling_judge_and_preserve_raw_trace() -> None:
+    generator = GeneratorStub(
+        [
+            "not json",
+            {"label": "CONTRADICT", "rationale": "x", "sentence_indices": [9]},
+        ]
+    )
+    result = ArgusAgent(RetrieverStub(), generator).verify("claim")
+
+    assert result.status == "invalid_response"
     assert result.prediction is None
+    assert len(generator.users) == 2
+    verifier_events = [
+        event for event in result.trace if event.get("purpose") == "evidence_verifier"
+    ]
+    assert [event["doc_id"] for event in verifier_events] == [1, 2]
+    assert [event["error_category"] for event in verifier_events] == [
+        "invalid_json",
+        "invalid_response",
+    ]
+    assert result.trace[-1]["outcome"] == "all_verifier_responses_invalid"
+
+
+def test_argus_result_rehydration_preserves_verifier_failure_trace() -> None:
+    result = ArgusAgent(RetrieverStub(), GeneratorStub(["not json", "not json"])).verify(
+        "claim", claim_id=9
+    )
+    rehydrated = ArgusResult.from_dict(result.to_dict())
+
+    assert rehydrated.trace == result.trace
 
 
 def test_argus_judge_keeps_shared_citation_validation() -> None:
@@ -198,3 +306,7 @@ def test_argus_metrics_keep_gold_access_post_inference_and_separate_challenge_co
         "evidence_verifier": 2,
         "judge": 1,
     }
+    evidence = metrics["argus"]["evidence"]
+    assert evidence["verification_attempts"] == 2
+    assert evidence["successful_verifier_classifications"] == 2
+    assert evidence["overall_verifier_valid_response_rate"] == 1.0

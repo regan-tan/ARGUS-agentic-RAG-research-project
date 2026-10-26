@@ -1,0 +1,15 @@
+{
+  "version": "argus-v3",
+  "model": "qwen3:4b-instruct-2507-q4_K_M",
+  "temperature": 0,
+  "top_k": 40,
+  "num_predict": 512,
+  "context_window_tokens": 8192,
+  "retrieval_k": 5,
+  "max_evidence_documents": 10,
+  "max_llm_calls": 12,
+  "challenge_enabled": true,
+  "seed": 42,
+  "timeout_seconds": 300,
+  "verifier_validation_failure_policy": "exclude_invalid_document_continue_claim"
+}

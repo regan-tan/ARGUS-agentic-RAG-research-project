@@ -246,20 +246,33 @@ by original SciFact document ID, retaining `discovered_by` provenance for docume
 agents. The deterministic Challenge query explicitly targets exceptions, limitations, conflicting
 findings, and alternative outcomes; it does not itself label a document as contradicting.
 
-The checked-in [`configs/argus-v2.json`](configs/argus-v2.json) records conservative defaults for
+The checked-in [`configs/argus-v3.json`](configs/argus-v3.json) records conservative defaults for
 the 8,192-token context window. Complete abstracts are never application-truncated. Ollama calls
 reported at or above the configured context window are rejected, as are malformed verifier output,
 out-of-range verifier citations, malformed judge output, and judge citations outside the verified
 document set. These conditions remain recorded failures rather than being converted to an
 `INSUFFICIENT` verdict.
 
-ARGUS v2 addresses an A40/Ollama smoke-test failure in which Qwen produced repetitive verifier
-rationale text until the fixed 512-token output budget ended before the JSON response completed.
-Both ARGUS rationale fields now use a 300-character JSON Schema limit and explicitly request one
-concise, non-repetitive sentence of at most 40 words. The ARGUS-only Judge schema also caps the
-evidence array at the configured verified-document budget (10 by default), preventing repeated
-citations from consuming the response budget; shared Standard RAG schemas and citation validation
-remain unchanged. The model, temperature, `num_predict=512`, and `num_ctx=8192` are unchanged.
+ARGUS v3 retains v2's 300-character, one-sentence rationale limits and adds an explicit verifier
+citation instruction: SUPPORT and CONTRADICT each require at least one valid zero-based sentence
+reference; otherwise the verifier must use INSUFFICIENT only when direct evidence is absent. The
+application remains authoritative: malformed JSON, unsupported labels, missing required citations,
+and invalid sentence offsets are rejected.
+
+Unlike v2, a validation-only failure for one abstract excludes only that abstract and records its
+document ID, raw response, error category/message, token usage, latency, and admission decision in
+the persisted trace. ARGUS continues verifying the remaining abstracts and the Judge receives only
+valid `VerifiedEvidence`. A partially verified claim may therefore produce a valid verdict; if all
+attempted verifier responses are invalid, no Judge call or fabricated verdict is produced. A run
+with no retrieved abstracts is recorded separately as a retrieval failure. Service errors,
+context-window failures, and exhausted LLM-call budgets remain claim-fatal. Existing Standard RAG
+and Iterative RAG validation behavior is unchanged.
+
+ARGUS metrics now additionally report verifier attempts, successful classifications, invalid
+responses, citation/missing-reference failures, other validation failures, excluded documents,
+partial/complete/all-invalid claim counts, each claim's verifier success ratio, and the overall
+valid-response rate. All are derived from saved traces and are available for both full and
+no-Challenge variants.
 
 After preparing the local dataset, BGE cache, and Ollama model, run a single claim or a controlled
 partial/full seed-42 evaluation:
@@ -273,12 +286,12 @@ uv run python scripts/run_argus.py --evaluate
 uv run python scripts/run_argus.py --evaluate --no-challenge
 ```
 
-For the A40 preflight after this v2 update, do not resume an `argus-v1` directory. Run the two
-five-claim variants into new output roots:
+For the A40 preflight after this v3 update, do not resume an `argus-v1` or `argus-v2` directory.
+Run the two five-claim variants into new output roots:
 
 ```cmd
-uv run --locked python scripts/run_argus.py --smoke-test --output-dir outputs/argus-v2-smoke-full
-uv run --locked python scripts/run_argus.py --smoke-test --no-challenge --output-dir outputs/argus-v2-smoke-no-challenge
+uv run --locked python scripts/run_argus.py --smoke-test --output-dir outputs/argus-v3-smoke-full
+uv run --locked python scripts/run_argus.py --smoke-test --no-challenge --output-dir outputs/argus-v3-smoke-no-challenge
 ```
 
 `--smoke-test` always selects five label-stratified claims from the seed-42 train-derived
