@@ -3,8 +3,10 @@
 ARGUS (Adversarial Retrieval and Grounded Understanding System) is an SMU IS469 research project investigating whether adversarial multi-agent RAG improves scientific claim verification over standard and single-agent RAG.
 
 Milestone 3 adds the reproducible Standard RAG baseline: one dense retrieval over SciFact, one local
-Qwen inference call, and strict structured-output/citation validation. It does not implement agents,
-iterative retrieval, fine-tuning, APIs, or a frontend.
+Qwen inference call, and strict structured-output/citation validation. Milestone 4 adds a separate,
+bounded Single-agent Iterative RAG workflow on the same retrieval, model, and evaluation contracts,
+leaving the baseline unchanged. The project does not yet implement the multi-agent ARGUS
+Support/Challenge/Verifier/Judge system, fine-tuning, APIs, or a frontend.
 
 ## Retrieval backends
 
@@ -143,11 +145,93 @@ they are never converted into `INSUFFICIENT`. The internal split is for developm
 The preserved historical retrieval results are summarized in
 [`reports/retrieval/milestone2-summary.md`](reports/retrieval/milestone2-summary.md).
 
+## Single-agent Iterative RAG
+
+Milestone 4 adds one LangGraph agent (`src/argus/agents/iterative.py`) that can search again when its
+evidence is inadequate:
+
+```text
+claim -> dense BGE/FAISS retrieval (k=5, identical to Standard RAG)
+      -> Qwen evidence-sufficiency assessment
+      -> if insufficient and budget remains: Qwen query rewrite -> retrieve again -> reassess
+      -> stop when sufficient or a budget is exhausted
+      -> Qwen verdict over all accumulated evidence -> validation
+```
+
+It reuses the same SciFact corpus, pinned BGE-small model, exact FAISS index, Ollama Qwen tag and
+decoding settings, internal seed-42 validation claims, gold-label policy, and classification/citation
+metric definitions as Standard RAG. The final verdict call reuses the Standard RAG prompt
+(`standard-rag-v1`), JSON schema, and citation validator unchanged; citations are validated against
+every document actually shown to that call. Only the sufficiency and query-rewrite prompts are new
+(`iterative-rag-v3`). All prompt versions and system-prompt hashes are recorded in run metadata.
+Prompt history from live smoke tests: v1 produced a verbose sufficiency answer that exceeded the
+512-token output limit; v2 bounded answer length but asked for the decision before the reasoning,
+and the assessor then never judged evidence sufficient (even when its own reason said the evidence
+directly contradicted the claim). v3 keeps the length bounds, has the model reason before deciding,
+and states explicitly that direct contradiction is sufficient evidence. These revisions were
+informed by the five-claim `--smoke-test` claims, which belong to the 162-claim internal validation
+set; no other evaluation claims and no official development labels were inspected.
+
+Evidence accumulates across rounds, deduplicated by original SciFact document ID. Sufficiency is
+judged by Qwen from abstract text only; retrieval scores are never shown to it. The agent receives
+only claim text, never gold labels or annotated evidence IDs. One model call is always reserved for
+the final verdict. Default budgets, all configurable:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--k` | 5 | Initial retrieval depth (same as Standard RAG) |
+| `--followup-k` | 5 | Retrieval depth of each later round |
+| `--max-retrieval-rounds` | 3 | Maximum retrieval calls per claim |
+| `--max-llm-calls` | 6 | Maximum Qwen calls per claim, including sufficiency, rewrite, and verdict |
+| `--max-evidence-documents` | 15 | Maximum distinct abstracts presented; excluded IDs are logged |
+
+Each claim records a stop reason: `evidence_sufficient`, `max_retrieval_rounds`, `max_llm_calls`,
+`max_evidence_documents` (the last three count as budget exhaustion), `no_new_evidence` (a follow-up
+search found only already-seen documents), `repeated_query`, or `failure`.
+
+LangGraph is the only added dependency (`uv add langgraph`, recorded in `pyproject.toml` and
+`uv.lock`); it provides the stateful conditional routing and bounded loop. `uv sync` installs it.
+
+Run one claim, the five-claim smoke test, a partial run, or the full 162-claim internal validation set:
+
+```cmd
+uv run python scripts/run_iterative_rag.py --claim "Example scientific claim"
+uv run python scripts/run_iterative_rag.py --smoke-test
+uv run python scripts/run_iterative_rag.py --evaluate --limit 5
+uv run python scripts/run_iterative_rag.py --evaluate
+```
+
+Each run writes a new ignored directory under `outputs/iterative_rag/` (never `outputs/rag/`). Every
+completed claim is appended to `predictions.jsonl` with its full agent trace: each retrieval round's
+query, retrieved/admitted/duplicate/excluded document IDs and latency, and each model call's purpose,
+prompt version, raw response, parsed decision, token counts, and latency. `metrics.json` contains the
+shared classification, citation, and failure metrics plus agent costs computed from those traces:
+retrieval rounds per claim, total retrieval and LLM calls (by purpose), prompt/completion tokens,
+distinct evidence documents, latency, stop reasons, and budget-exhaustion frequency. Interrupted runs
+resume exactly as Standard RAG does:
+
+```cmd
+uv run python scripts/run_iterative_rag.py --evaluate --resume outputs/iterative_rag/<run-id>
+```
+
+Resume is rejected unless the model digest, generation settings, retrieval configuration, agent
+budgets, prompt hashes, seed, and selected claim IDs exactly match. Failed sufficiency, rewrite, or
+verdict calls are recorded as failures without a prediction; they are never converted into
+`INSUFFICIENT`.
+
+Limitations: the agent makes up to six Qwen calls per claim, so CPU runs are several times slower
+than Standard RAG and a full 162-claim evaluation is a multi-hour job. Accumulating up to 15 complete
+abstracts can reach the 8,192-token context window; such calls are rejected as
+`context_limit_exceeded` rather than truncated. Sufficiency judgments come from the same small
+quantized model and are not calibrated confidence. No claim that iterative RAG outperforms Standard
+RAG is made until both are evaluated on the same full claim set.
+
 ## Limitations and next milestone
 
 CPU-only Qwen inference can be slow, local quantization can affect output, a fixed context window can
 become limiting for unusually long retrieved evidence, and retrieval misses remain an upper bound on
 grounded verdict quality. SciFact's evidence annotations are benchmark labels rather than exhaustive
 scientific truth. Temperature zero and pinned settings improve reproducibility but do not guarantee
-identical output across Ollama/runtime/hardware versions. The next milestone is Single-agent
-Iterative RAG, which must be evaluated against this one-pass baseline rather than altering it.
+identical output across Ollama/runtime/hardware versions. Iterative RAG must be evaluated against the
+one-pass baseline rather than altering it. The next milestone is the multi-agent ARGUS system
+(Support/Challenge agents, Evidence Verifier, and Judge).
