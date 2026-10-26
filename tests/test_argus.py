@@ -6,9 +6,24 @@ import json
 
 import pytest
 
-from argus.agents.argus import ArgusAgent, ArgusConfig, evaluate_argus_attempts, merge_evidence
+from argus.agents.argus import (
+    CONCISE_REASONING_INSTRUCTION,
+    JUDGE_SYSTEM_PROMPT,
+    MAX_JUDGE_EVIDENCE_REFERENCES,
+    MAX_RATIONALE_CHARS,
+    PROMPT_VERSION,
+    VERIFIER_SYSTEM_PROMPT,
+    ArgusAgent,
+    ArgusConfig,
+    evaluate_argus_attempts,
+    judge_json_schema,
+    merge_evidence,
+    prompt_fingerprints,
+    verifier_json_schema,
+)
 from argus.data.models import Claim, CorpusDocument, EvidenceAnnotation
 from argus.llm.ollama import GenerationMetadata, OllamaChatResponse
+from argus.rag.standard import response_json_schema
 from argus.retrieval.types import RetrievalResult
 
 
@@ -37,6 +52,30 @@ class GeneratorStub:
             json.dumps(next(self.responses)),
             GenerationMetadata(10, 5, None, None, None, None, 0.01),
         )
+
+
+def test_argus_v2_schemas_bound_rationales_without_mutating_standard_rag_schema() -> None:
+    verifier_schema = verifier_json_schema()
+    judge_schema = judge_json_schema()
+
+    assert verifier_schema["properties"]["rationale"]["maxLength"] == MAX_RATIONALE_CHARS
+    assert judge_schema["properties"]["rationale"]["maxLength"] == MAX_RATIONALE_CHARS
+    assert judge_schema["properties"]["evidence"]["maxItems"] == MAX_JUDGE_EVIDENCE_REFERENCES
+    assert judge_schema["required"] == ["verdict", "rationale", "evidence"]
+    assert "maxLength" not in response_json_schema()["properties"]["rationale"]
+
+
+def test_argus_v2_prompts_and_fingerprints_record_concise_reasoning() -> None:
+    assert PROMPT_VERSION == "argus-v2"
+    assert CONCISE_REASONING_INSTRUCTION in VERIFIER_SYSTEM_PROMPT
+    assert CONCISE_REASONING_INSTRUCTION in JUDGE_SYSTEM_PROMPT
+    fingerprints = prompt_fingerprints()
+    assert fingerprints["evidence_verifier"]["version"] == "argus-v2"
+    assert fingerprints["judge"]["version"] == "argus-v2"
+    assert (
+        fingerprints["evidence_verifier"]["system_prompt_sha256"]
+        != fingerprints["judge"]["system_prompt_sha256"]
+    )
 
 
 def test_merge_preserves_cross_agent_provenance_and_is_deterministic() -> None:
@@ -97,6 +136,26 @@ def test_invalid_verifier_citations_are_recorded_as_failures(
         RetrieverStub(), GeneratorStub([verification]), ArgusConfig(challenge_enabled=False)
     ).verify("claim")
     assert result.status == status
+    assert result.prediction is None
+
+
+def test_argus_judge_keeps_shared_citation_validation() -> None:
+    result = ArgusAgent(
+        RetrieverStub(),
+        GeneratorStub(
+            [
+                {"label": "SUPPORT", "rationale": "Direct.", "sentence_indices": [0]},
+                {"label": "CONTRADICT", "rationale": "Direct.", "sentence_indices": [0]},
+                {
+                    "verdict": "SUPPORT",
+                    "rationale": "Grounded.",
+                    "evidence": [{"doc_id": 99, "sentence_indices": [0]}],
+                },
+            ]
+        ),
+    ).verify("claim")
+
+    assert result.status == "invalid_response"
     assert result.prediction is None
 
 

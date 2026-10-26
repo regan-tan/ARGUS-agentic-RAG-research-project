@@ -5,8 +5,8 @@ ARGUS (Adversarial Retrieval and Grounded Understanding System) is an SMU IS469 
 Milestone 3 adds the reproducible Standard RAG baseline: one dense retrieval over SciFact, one local
 Qwen inference call, and strict structured-output/citation validation. Milestone 4 adds a separate,
 bounded Single-agent Iterative RAG workflow on the same retrieval, model, and evaluation contracts,
-leaving the baseline unchanged. The project does not yet implement the multi-agent ARGUS
-Support/Challenge/Verifier/Judge system, fine-tuning, APIs, or a frontend.
+leaving the baseline unchanged. Experiment 3 adds the bounded multi-agent ARGUS
+Support/Challenge/Verifier/Judge system; fine-tuning, APIs, and a frontend are not implemented.
 
 ## Retrieval backends
 
@@ -246,12 +246,20 @@ by original SciFact document ID, retaining `discovered_by` provenance for docume
 agents. The deterministic Challenge query explicitly targets exceptions, limitations, conflicting
 findings, and alternative outcomes; it does not itself label a document as contradicting.
 
-The checked-in [`configs/argus-v1.json`](configs/argus-v1.json) records conservative defaults for
+The checked-in [`configs/argus-v2.json`](configs/argus-v2.json) records conservative defaults for
 the 8,192-token context window. Complete abstracts are never application-truncated. Ollama calls
 reported at or above the configured context window are rejected, as are malformed verifier output,
 out-of-range verifier citations, malformed judge output, and judge citations outside the verified
 document set. These conditions remain recorded failures rather than being converted to an
 `INSUFFICIENT` verdict.
+
+ARGUS v2 addresses an A40/Ollama smoke-test failure in which Qwen produced repetitive verifier
+rationale text until the fixed 512-token output budget ended before the JSON response completed.
+Both ARGUS rationale fields now use a 300-character JSON Schema limit and explicitly request one
+concise, non-repetitive sentence of at most 40 words. The ARGUS-only Judge schema also caps the
+evidence array at the configured verified-document budget (10 by default), preventing repeated
+citations from consuming the response budget; shared Standard RAG schemas and citation validation
+remain unchanged. The model, temperature, `num_predict=512`, and `num_ctx=8192` are unchanged.
 
 After preparing the local dataset, BGE cache, and Ollama model, run a single claim or a controlled
 partial/full seed-42 evaluation:
@@ -263,6 +271,14 @@ uv run python scripts/run_argus.py --smoke-test --no-challenge
 uv run python scripts/run_argus.py --evaluate --limit 5
 uv run python scripts/run_argus.py --evaluate
 uv run python scripts/run_argus.py --evaluate --no-challenge
+```
+
+For the A40 preflight after this v2 update, do not resume an `argus-v1` directory. Run the two
+five-claim variants into new output roots:
+
+```cmd
+uv run --locked python scripts/run_argus.py --smoke-test --output-dir outputs/argus-v2-smoke-full
+uv run --locked python scripts/run_argus.py --smoke-test --no-challenge --output-dir outputs/argus-v2-smoke-no-challenge
 ```
 
 `--smoke-test` always selects five label-stratified claims from the seed-42 train-derived
