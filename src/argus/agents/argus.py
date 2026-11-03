@@ -291,9 +291,7 @@ def judge_json_schema(
     sentence_indices: dict[str, object] = {"type": "array", "items": {"type": "integer"}}
     if version == "v4":
         max_evidence_references = min(max_evidence_references, MAX_JUDGE_V4_EVIDENCE_REFERENCES)
-        sentence_indices.update(
-            minItems=1, maxItems=MAX_JUDGE_V4_SENTENCE_INDICES, uniqueItems=True
-        )
+        sentence_indices.update(minItems=1, maxItems=MAX_JUDGE_V4_SENTENCE_INDICES)
 
     return {
         "type": "object",
@@ -962,10 +960,16 @@ class ArgusAgent:
         try:
             verdict = validate_response(response.content, allowed)
             if is_v4:
-                if len(verdict.evidence) > MAX_JUDGE_V4_EVIDENCE_REFERENCES:
+                raw_evidence = json.loads(response.content)["evidence"]
+                if len(raw_evidence) > MAX_JUDGE_V4_EVIDENCE_REFERENCES:
                     raise ValidationError("invalid_response", "v4 Judge cited too many documents")
-                for reference in verdict.evidence:
-                    indices = reference.sentence_indices
+                cited_ids: set[str] = set()
+                for reference in raw_evidence:
+                    doc_id = canonical_document_id(reference["doc_id"])
+                    if doc_id in cited_ids:
+                        raise ValidationError("invalid_response", "v4 Judge duplicated a document")
+                    cited_ids.add(doc_id)
+                    indices = reference["sentence_indices"]
                     if (
                         len(indices) > MAX_JUDGE_V4_SENTENCE_INDICES
                         or len(set(indices)) != len(indices)
