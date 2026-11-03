@@ -331,7 +331,7 @@ def test_v4_schema_bounds_citations_without_changing_v3_or_standard() -> None:
     assert v4_evidence["maxItems"] == MAX_JUDGE_V4_EVIDENCE_REFERENCES
     assert v4_indices["minItems"] == 1
     assert v4_indices["maxItems"] == MAX_JUDGE_V4_SENTENCE_INDICES
-    assert v4_indices["uniqueItems"] is True
+    assert "uniqueItems" not in v4_indices
     assert "maxItems" not in response_json_schema()["properties"]["evidence"]
 
 
@@ -371,6 +371,11 @@ def test_v4_judge_allows_empty_evidence_for_insufficient() -> None:
     [
         [{"doc_id": 1, "sentence_indices": []}],
         [{"doc_id": 1, "sentence_indices": [9]}],
+        [{"doc_id": 1, "sentence_indices": [0, 0, 0, 0]}],
+        [
+            {"doc_id": 1, "sentence_indices": [0]},
+            {"doc_id": 1, "sentence_indices": [0]},
+        ],
     ],
 )
 def test_v4_judge_keeps_strict_citation_validation(
@@ -394,3 +399,21 @@ def test_v4_judge_keeps_strict_citation_validation(
     assert result.status == "invalid_response"
     assert result.prediction is None
     assert result.raw_response is not None
+
+
+def test_v4_judge_truncated_json_is_recorded_without_retry() -> None:
+    generator = GeneratorStub(
+        [
+            {"label": "SUPPORT", "rationale": "Direct.", "sentence_indices": [0]},
+            '{"evidence": [{"doc_id": 1, "sentence_indices": [0]}], "rationale":',
+        ]
+    )
+    result = ArgusAgent(
+        RetrieverStub(), generator, ArgusConfig(challenge_enabled=False, judge_version="v4")
+    ).verify("claim")
+
+    assert result.status == "invalid_json"
+    assert result.prediction is None
+    assert result.llm_calls == 2
+    assert result.raw_response is not None
+    assert result.trace[-1]["purpose"] == "judge"
