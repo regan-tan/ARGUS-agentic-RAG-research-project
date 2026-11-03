@@ -9,7 +9,11 @@ import pytest
 from argus.agents.argus import (
     CONCISE_REASONING_INSTRUCTION,
     JUDGE_SYSTEM_PROMPT,
+    JUDGE_V4_SYSTEM_PROMPT,
+    JUDGE_V4_VERSION,
     MAX_JUDGE_EVIDENCE_REFERENCES,
+    MAX_JUDGE_V4_EVIDENCE_REFERENCES,
+    MAX_JUDGE_V4_SENTENCE_INDICES,
     MAX_RATIONALE_CHARS,
     PROMPT_VERSION,
     VERIFIER_SYSTEM_PROMPT,
@@ -52,9 +56,13 @@ class GeneratorStub:
     def __init__(self, responses: list[object]) -> None:
         self.responses = iter(responses)
         self.users: list[str] = []
+        self.systems: list[str] = []
+        self.schemas: list[object] = []
 
     def chat(self, *, system: str, user: str, response_schema: object) -> OllamaChatResponse:
         self.users.append(user)
+        self.systems.append(system)
+        self.schemas.append(response_schema)
         response = next(self.responses)
         return OllamaChatResponse(
             response if isinstance(response, str) else json.dumps(response),
@@ -310,3 +318,79 @@ def test_argus_metrics_keep_gold_access_post_inference_and_separate_challenge_co
     assert evidence["verification_attempts"] == 2
     assert evidence["successful_verifier_classifications"] == 2
     assert evidence["overall_verifier_valid_response_rate"] == 1.0
+
+
+def test_v4_schema_bounds_citations_without_changing_v3_or_standard() -> None:
+    v3 = judge_json_schema()
+    v4 = judge_json_schema(version="v4")
+    v4_evidence = v4["properties"]["evidence"]
+    v4_indices = v4_evidence["items"]["properties"]["sentence_indices"]
+
+    assert v3["properties"]["evidence"]["maxItems"] == MAX_JUDGE_EVIDENCE_REFERENCES
+    assert "maxItems" not in v3["properties"]["evidence"]["items"]["properties"]["sentence_indices"]
+    assert v4_evidence["maxItems"] == MAX_JUDGE_V4_EVIDENCE_REFERENCES
+    assert v4_indices["minItems"] == 1
+    assert v4_indices["maxItems"] == MAX_JUDGE_V4_SENTENCE_INDICES
+    assert v4_indices["uniqueItems"] is True
+    assert "maxItems" not in response_json_schema()["properties"]["evidence"]
+
+
+def test_v4_changes_only_judge_prompt_fingerprint() -> None:
+    v3 = prompt_fingerprints()
+    v4 = prompt_fingerprints("v4")
+
+    assert v4["evidence_verifier"] == v3["evidence_verifier"]
+    assert v4["judge"]["version"] == JUDGE_V4_VERSION
+    assert v4["judge"]["system_prompt_sha256"] != v3["judge"]["system_prompt_sha256"]
+    assert "For INSUFFICIENT with no decisive evidence" in JUDGE_V4_SYSTEM_PROMPT
+
+
+def test_v4_judge_allows_empty_evidence_for_insufficient() -> None:
+    generator = GeneratorStub(
+        [
+            {"label": "INSUFFICIENT", "rationale": "Not direct evidence.", "sentence_indices": []},
+            {"verdict": "INSUFFICIENT", "rationale": "Evidence is inconclusive.", "evidence": []},
+        ]
+    )
+    result = ArgusAgent(
+        RetrieverStub(), generator, ArgusConfig(challenge_enabled=False, judge_version="v4")
+    ).verify("claim")
+
+    assert result.status == "success"
+    assert result.response is not None
+    assert result.response.evidence == ()
+    assert generator.systems[0] == VERIFIER_SYSTEM_PROMPT
+    assert generator.systems[-1] == JUDGE_V4_SYSTEM_PROMPT
+    assert generator.schemas[-1] == judge_json_schema(version="v4")
+    judge_event = next(event for event in result.trace if event.get("purpose") == "judge")
+    assert judge_event["prompt_version"] == JUDGE_V4_VERSION
+
+
+@pytest.mark.parametrize(
+    "bad_evidence",
+    [
+        [{"doc_id": 1, "sentence_indices": []}],
+        [{"doc_id": 1, "sentence_indices": [9]}],
+    ],
+)
+def test_v4_judge_keeps_strict_citation_validation(
+    bad_evidence: list[dict[str, object]],
+) -> None:
+    result = ArgusAgent(
+        RetrieverStub(),
+        GeneratorStub(
+            [
+                {"label": "SUPPORT", "rationale": "Direct.", "sentence_indices": [0]},
+                {
+                    "verdict": "SUPPORT",
+                    "rationale": "Grounded.",
+                    "evidence": bad_evidence,
+                },
+            ]
+        ),
+        ArgusConfig(challenge_enabled=False, judge_version="v4"),
+    ).verify("claim")
+
+    assert result.status == "invalid_response"
+    assert result.prediction is None
+    assert result.raw_response is not None
