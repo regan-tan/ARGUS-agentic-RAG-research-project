@@ -64,7 +64,9 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--no-challenge", action="store_true")
     parser.add_argument("--judge-version", choices=("v3", "v4"), default="v3")
     parser.add_argument("--challenge-retrieval", choices=tuple(CHALLENGE_METHODS), default="dense")
-    parser.add_argument("--challenge-query", choices=("suffix", "claim"), default="suffix")
+    parser.add_argument(
+        "--challenge-query", choices=("suffix", "claim", "counter_hypothesis"), default="suffix"
+    )
     parser.add_argument("--challenge-exclude-support", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--k", type=int, default=5)
@@ -162,7 +164,7 @@ def main() -> int:
         "variant": config.variant(),
         "seed": args.seed,
         "agent": config.to_dict(),
-        "prompts": prompt_fingerprints(args.judge_version),
+        "prompts": prompt_fingerprints(args.judge_version, args.challenge_query),
         "retrieval": {
             "method": "dense BGE-small plus FAISS IndexFlatIP",
             "k": args.k,

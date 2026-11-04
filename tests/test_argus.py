@@ -11,6 +11,8 @@ import pytest
 
 from argus.agents.argus import (
     CHALLENGE_QUERY_SUFFIX,
+    CHALLENGE_QUERY_SYSTEM_PROMPT,
+    CHALLENGE_QUERY_VERSION,
     CONCISE_REASONING_INSTRUCTION,
     JUDGE_SYSTEM_PROMPT,
     JUDGE_V4_SYSTEM_PROMPT,
@@ -32,6 +34,7 @@ from argus.agents.argus import (
     prompt_fingerprints,
     verifier_json_schema,
 )
+from argus.agents.iterative import rewrite_json_schema
 from argus.data.models import Claim, CorpusDocument, EvidenceAnnotation
 from argus.llm.ollama import GenerationMetadata, OllamaChatResponse
 from argus.rag.standard import response_json_schema
@@ -162,13 +165,15 @@ class FailingRetriever:
         raise OSError("index unavailable")
 
 
-def insufficient_run(document_count: int) -> GeneratorStub:
+def insufficient_responses(document_count: int) -> list[object]:
     verifications: list[object] = [
         {"label": "INSUFFICIENT", "rationale": "Not direct.", "sentence_indices": []}
     ] * document_count
-    return GeneratorStub(
-        [*verifications, {"verdict": "INSUFFICIENT", "rationale": "Not enough.", "evidence": []}]
-    )
+    return [*verifications, {"verdict": "INSUFFICIENT", "rationale": "Not enough.", "evidence": []}]
+
+
+def insufficient_run(document_count: int) -> GeneratorStub:
+    return GeneratorStub(insufficient_responses(document_count))
 
 
 def test_default_challenge_configuration_keeps_recorded_dense_suffix_behavior() -> None:
@@ -368,6 +373,134 @@ def test_hybrid_challenge_excludes_support_and_keeps_support_on_dense() -> None:
     assert config.variant() == "hybrid_claim_exclude"
 
 
+def test_counter_hypothesis_sees_only_the_claim_and_drives_challenge_search() -> None:
+    dense = RecordingRetriever(1, 2)
+    generator = GeneratorStub([{"query": "drug has no effect"}, *insufficient_responses(2)])
+    config = ArgusConfig(challenge_query="counter_hypothesis")
+    result = ArgusAgent(dense, generator, config).verify("Drug lowers pressure", claim_id=7)
+    assert result.status == "success"
+    assert dense.queries == ["Drug lowers pressure", "drug has no effect"]
+    assert generator.systems[0] == CHALLENGE_QUERY_SYSTEM_PROMPT
+    assert generator.users[0] == "<claim>\nDrug lowers pressure\n</claim>"
+    assert generator.schemas[0] == rewrite_json_schema()
+    kinds = [event.get("purpose") or event.get("agent") for event in result.trace[1:4]]
+    assert kinds == ["support", "challenge_query", "challenge"]
+    query_event = result.trace[2]
+    assert query_event["call_index"] == 1
+    assert query_event["prompt_version"] == CHALLENGE_QUERY_VERSION
+    assert query_event["parsed"] == {"query": "drug has no effect"}
+    assert result.trace[3]["query"] == "drug has no effect"
+    assert result.llm_calls == 4
+    assert config.variant() == "dense_counter_hypothesis"
+    assert "drug has no effect" not in generator.users[1]
+    assert "drug has no effect" not in generator.users[2]
+
+
+def test_counter_hypothesis_query_does_not_change_verifier_or_judge_prompts() -> None:
+    dense = RecordingRetriever(1)
+    baseline = insufficient_run(1)
+    ArgusAgent(dense, baseline, ArgusConfig(challenge_query="claim")).verify("A claim")
+    generated = GeneratorStub([{"query": "no effect"}, *insufficient_responses(1)])
+    ArgusAgent(dense, generated, ArgusConfig(challenge_query="counter_hypothesis")).verify(
+        "A claim"
+    )
+    assert generated.systems[1:] == baseline.systems
+    assert generated.users[1:] == baseline.users
+
+
+@pytest.mark.parametrize(
+    ("response", "status"),
+    [
+        ("{not json", "invalid_json"),
+        ({"query": "   "}, "invalid_response"),
+        ({"query": " ".join(["word"] * 41)}, "invalid_response"),
+        ({"other": "field"}, "invalid_response"),
+    ],
+)
+def test_invalid_counter_hypothesis_fails_the_claim_without_fallback(
+    response: object, status: str
+) -> None:
+    dense = RecordingRetriever(1)
+    generator = GeneratorStub([response])
+    config = ArgusConfig(challenge_query="counter_hypothesis")
+    result = ArgusAgent(dense, generator, config).verify("A claim")
+    assert result.status == status
+    assert result.prediction is None
+    assert "Challenge query rejected" in str(result.failure_message)
+    assert dense.queries == ["A claim"]
+    assert len(generator.users) == 1
+    assert result.raw_response == (response if isinstance(response, str) else json.dumps(response))
+    assert all(event.get("agent") != "challenge" for event in result.trace)
+
+
+def test_counter_hypothesis_generator_error_fails_the_claim() -> None:
+    class FailingGenerator:
+        def chat(self, *, system: str, user: str, response_schema: object) -> OllamaChatResponse:
+            raise OSError("model unavailable")
+
+    dense = RecordingRetriever(1)
+    config = ArgusConfig(challenge_query="counter_hypothesis")
+    result = ArgusAgent(dense, FailingGenerator(), config).verify("A claim")
+    assert result.status == "inference_failure"
+    assert result.prediction is None
+    assert "model unavailable" in str(result.failure_message)
+    assert dense.queries == ["A claim"]
+
+
+def test_counter_hypothesis_is_skipped_when_support_retrieval_failed() -> None:
+    generator = GeneratorStub([])
+    config = ArgusConfig(challenge_query="counter_hypothesis")
+    result = ArgusAgent(FailingRetriever(), generator, config).verify("A claim")
+    assert result.status == "retrieval_failure"
+    assert "support retrieval failed" in str(result.failure_message)
+    assert generator.users == []
+
+
+def test_counter_hypothesis_with_exclusion_uses_exactly_the_full_llm_budget() -> None:
+    dense = RecordingRetriever(*range(1, 11))
+    generator = GeneratorStub([{"query": "no effect"}, *insufficient_responses(10)])
+    config = ArgusConfig(challenge_query="counter_hypothesis", challenge_exclude_support=True)
+    result = ArgusAgent(dense, generator, config).verify("A claim")
+    assert result.status == "success"
+    assert len(result.evidence) == 10
+    assert len(generator.users) == 12
+    assert result.llm_calls == 12
+    assert config.variant() == "dense_counter_hypothesis_exclude"
+
+
+def test_counter_hypothesis_call_counts_toward_budget_exhaustion() -> None:
+    generator = GeneratorStub([{"query": "no effect"}])
+    config = ArgusConfig(challenge_query="counter_hypothesis", max_llm_calls=1)
+    result = ArgusAgent(RecordingRetriever(1), generator, config).verify("A claim")
+    assert result.status == "inference_failure"
+    assert result.failure_message == "maximum LLM-call budget exhausted"
+    assert len(generator.users) == 1
+
+
+def test_counter_hypothesis_call_survives_rehydration_and_is_counted_in_metrics() -> None:
+    generator = GeneratorStub([{"query": "no effect"}, *insufficient_responses(1)])
+    config = ArgusConfig(challenge_query="counter_hypothesis")
+    result = ArgusAgent(RecordingRetriever(1), generator, config).verify("claim", claim_id=1)
+    restored = ArgusResult.from_dict(json.loads(json.dumps(result.to_dict())))
+    assert restored.llm_calls == 3
+    metrics = evaluate_argus_attempts([Claim(1, "claim", (), {})], {"1": restored})
+    assert metrics["argus"]["efficiency"]["llm_calls_by_component"] == {
+        "challenge_query": 1,
+        "evidence_verifier": 1,
+        "judge": 1,
+    }
+
+
+def test_challenge_query_prompt_is_fingerprinted_only_when_used() -> None:
+    assert "challenge_query" not in prompt_fingerprints()
+    assert "challenge_query" not in prompt_fingerprints("v3", "claim")
+    used = prompt_fingerprints("v3", "counter_hypothesis")
+    assert used["challenge_query"]["version"] == CHALLENGE_QUERY_VERSION
+    assert {key: value for key, value in used.items() if key != "challenge_query"} == (
+        prompt_fingerprints()
+    )
+
+
 def test_exclude_support_with_default_query_is_not_labelled_full() -> None:
     assert ArgusConfig(challenge_exclude_support=True).variant() == "dense_suffix_exclude"
 
@@ -411,7 +544,9 @@ class FakeOllamaClient:
 
     def chat(self, *, system: str, user: str, response_schema: object) -> OllamaChatResponse:
         payload: dict[str, object] = (
-            {"verdict": "INSUFFICIENT", "rationale": "Not enough.", "evidence": []}
+            {"query": "goitre radioiodine no effect"}
+            if system == CHALLENGE_QUERY_SYSTEM_PROMPT
+            else {"verdict": "INSUFFICIENT", "rationale": "Not enough.", "evidence": []}
             if system == JUDGE_SYSTEM_PROMPT
             else {"label": "INSUFFICIENT", "rationale": "Not direct.", "sentence_indices": []}
         )
@@ -550,6 +685,27 @@ def test_build_challenge_retriever_matches_the_requested_method() -> None:
     assert isinstance(hybrid, HybridRetriever)
     assert hybrid.dense is dense
     assert (hybrid.candidate_pool, hybrid.rrf_constant) == (50, 60)
+
+
+def test_cli_records_the_counter_hypothesis_arm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    exit_code, module = run_cli(monkeypatch, tmp_path, "--challenge-query", "counter_hypothesis")
+    assert exit_code == 0
+    metadata = read_cli_metadata(tmp_path)
+    assert metadata["variant"] == "dense_counter_hypothesis"
+    assert metadata["implementation_version"] == "argus-v3-challenge-retrieval"
+    assert metadata["retrieval"]["challenge"] == {
+        "method": module.CHALLENGE_METHODS["dense"],
+        "query": "counter_hypothesis",
+        "exclude_support": False,
+    }
+    assert metadata["prompts"]["challenge_query"]["version"] == CHALLENGE_QUERY_VERSION
+    record = json.loads(
+        (next(tmp_path.iterdir()) / "predictions.jsonl").read_text(encoding="utf-8")
+    )
+    challenge = next(event for event in record["trace"] if event.get("agent") == "challenge")
+    assert challenge["query"] == "goitre radioiodine no effect"
 
 
 def test_cli_rejects_exclude_support_with_no_challenge(

@@ -341,7 +341,7 @@ see which agent found a document:
 | Option | Values | Default |
 | --- | --- | --- |
 | `--challenge-retrieval` | `dense`, `bm25`, `hybrid` | `dense` |
-| `--challenge-query` | `suffix`, `claim` | `suffix` |
+| `--challenge-query` | `suffix`, `claim`, `counter_hypothesis` | `suffix` |
 | `--challenge-exclude-support` | flag | off |
 
 ```cmd
@@ -349,7 +349,14 @@ uv run --locked python scripts/run_argus.py --smoke-test --challenge-retrieval b
 uv run --locked python scripts/run_argus.py --evaluate --challenge-retrieval bm25 --challenge-query claim
 uv run --locked python scripts/run_argus.py --evaluate --challenge-query claim --challenge-exclude-support
 uv run --locked python scripts/run_argus.py --evaluate --challenge-retrieval hybrid --challenge-query claim --challenge-exclude-support
+uv run --locked python scripts/run_argus.py --evaluate --challenge-query counter_hypothesis
 ```
+
+`counter_hypothesis` makes one extra Qwen call that sees only the claim and writes a search query
+for conflicting findings (prompt `argus-challenge-query-v1`, recorded in run metadata). The query is
+used only for searching and is never shown to the Verifier or Judge. If the call fails or its query
+is invalid, the claim fails without a verdict; there is no retry or fallback to another query. With
+`--challenge-exclude-support`, a claim can use the entire default budget of 12 model calls.
 
 `hybrid` is the existing reciprocal rank fusion of BM25 and dense rankings with its default
 settings. `--challenge-exclude-support` makes Challenge return only documents Support did not find, up to
