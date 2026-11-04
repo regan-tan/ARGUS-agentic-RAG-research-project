@@ -376,3 +376,54 @@ noise, and whether the supposedly misleading documents are genuinely relevant-lo
 with independent claim-scoped wrappers and collect model/citation/cost outcomes for each noise
 level; keep v3 Judge fixed until Judge v4 ablations have been reported separately. No claim of
 improved robustness is justified by the CPU preflight alone.
+
+### Model-backed robustness runner (A40, after CPU checks)
+
+`scripts/run_robustness.py` runs the **unchanged** original system implementation
+with the same claim-scoped `NoisyRetriever` contract. Options:
+
+- `--system standard|iterative|argus|argus-no-challenge`
+- `--noise-level 0|1|2|3` (replacements attempted **per retrieval call**)
+- `--pilot N` selects N train-derived development claims, disjoint from the 162 validation claims
+- `--evaluate` selects all 162 train-derived internal-validation claims **only after freeze**
+- `--resume OUTPUT_DIRECTORY` resumes exactly compatible append-only prediction records
+
+CPU-only code checks:
+
+```cmd
+uv run --locked pytest -q tests/test_robustness.py tests/test_robustness_runner.py
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+```
+
+When Ollama is running inside an allocated A40 job, run the **same five development
+claims** across systems/conditions as a protocol pilot:
+
+```bash
+uv run --locked python scripts/run_robustness.py --pilot 5 --system standard --noise-level 0
+uv run --locked python scripts/run_robustness.py --pilot 5 --system standard --noise-level 2
+uv run --locked python scripts/run_robustness.py --pilot 5 --system iterative --noise-level 2
+uv run --locked python scripts/run_robustness.py --pilot 5 --system argus --noise-level 2
+```
+
+After checking that all trace/evidence/latency metrics are valid, select a fixed evaluation
+plan and run all 3 systems under all four noise levels with `--evaluate` (12 configurations),
+plus `argus-no-challenge` if resources allow. Each command writes a new ignored
+`outputs/robustness/runs/<system>__noise<level>__<timestamp>/` with
+`metadata.json`, `predictions.jsonl` (including injected document records for each
+query), and `metrics.json`. Interrupted runs may be resumed with the **same CLI
+options** and `--resume`.
+
+For the clean `noise-level 0` case, the wrapper makes an unchanged original
+top-k retrieval call; it does not draw extra candidates. With nonzero noise, it expands
+the retrieved candidate pool to 20, but still passes the original `k` results to each
+agent, logging the extra retrieval cost. For iterative followups and the ARGUS Challenge,
+the policy applies to **their own** query and documents, not artificially shared
+documents across different queries. Metrics always record realized noise dose.
+
+The robustness protocol uses held-out annotation IDs **only** to protect already-retrieved
+gold sources against removal. This is a gold-preserving intervention rather than an
+annotation-free real-world attack. Distinct lower-ranked results are not automatically
+proven semantically misleading. Include qualitative review and this limitation in the
+report. Do not assume accuracy improves, and do not replace existing clean v3 results
+with the new controlled runs. Keep Judge v4 evaluation on its own branch/PR.
