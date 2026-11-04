@@ -159,9 +159,7 @@ class NoisyRetriever:
 
         returned = list(original)
         replacements: list[NoiseReplacement] = []
-        for slot, candidate in zip(
-            eligible_slots[:count], candidates[:count], strict=True
-        ):
+        for slot, candidate in zip(eligible_slots[:count], candidates[:count], strict=True):
             removed = original[slot]
             returned[slot] = RetrievalResult(
                 candidate.doc_id,

@@ -31,9 +31,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--noise-levels", nargs="+", type=int, default=[0, 1, 2, 3])
     parser.add_argument("--data-dir", type=Path, default=Path("data/scifact"))
     parser.add_argument("--cache-dir", type=Path, default=Path("data/retrieval_cache"))
-    parser.add_argument(
-        "--output-dir", type=Path, default=Path("outputs/robustness/preflight")
-    )
+    parser.add_argument("--output-dir", type=Path, default=Path("outputs/robustness/preflight"))
     return parser.parse_args()
 
 
