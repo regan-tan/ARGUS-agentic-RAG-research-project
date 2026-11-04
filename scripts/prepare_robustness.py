@@ -39,8 +39,8 @@ def arguments() -> argparse.Namespace:
 
 def main() -> int:
     args = arguments()
-    if args.limit <= 0 or args.k <= 0 or args.candidate_pool <= args.k:
-        raise ValueError("--limit and --k must be positive; candidate pool must exceed k")
+    if args.limit < 3 or args.k <= 0 or args.candidate_pool <= args.k:
+        raise ValueError("--limit must be at least 3; k positive; candidate pool must exceed k")
     levels = sorted(set(args.noise_levels))
     if not levels or levels[0] != 0 or levels[-1] > args.k or levels[0] < 0:
         raise ValueError("--noise-levels must include 0 and remain between 0 and k")
