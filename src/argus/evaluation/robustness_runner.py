@@ -117,7 +117,11 @@ def evaluate_noisy_attempts(
     if system == "iterative":
         return evaluate_iterative_attempts(
             claims,
-            {key: value for key, value in attempts.items() if isinstance(value, IterativeRAGResult)},
+            {
+                key: value
+                for key, value in attempts.items()
+                if isinstance(value, IterativeRAGResult)
+            },
         )
     if system in {"argus", "argus-no-challenge"}:
         return evaluate_argus_attempts(
