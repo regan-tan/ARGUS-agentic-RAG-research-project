@@ -48,9 +48,7 @@ def build_system(
     if k <= 0 or num_ctx <= 0:
         raise ValueError("k and num_ctx must be positive")
     if system == "standard":
-        return StandardRAGPipeline(
-            retriever, generator, k=k, context_window_tokens=num_ctx
-        )
+        return StandardRAGPipeline(retriever, generator, k=k, context_window_tokens=num_ctx)
     if system == "iterative":
         return IterativeRAGAgent(
             retriever,

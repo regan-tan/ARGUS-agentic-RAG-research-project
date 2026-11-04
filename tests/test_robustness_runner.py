@@ -43,9 +43,7 @@ class GeneratorStub:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def chat(
-        self, *, system: str, user: str, response_schema: object
-    ) -> OllamaChatResponse:
+    def chat(self, *, system: str, user: str, response_schema: object) -> OllamaChatResponse:
         self.calls.append((system, user))
         if "evidence-sufficiency assessor" in system:
             response: dict[str, object] = {
@@ -97,9 +95,7 @@ def test_noise_is_passed_through_every_original_pipeline(system: str) -> None:
     assert len(events) >= 1
     assert all(event["actual_replacements"] == 1 for event in events)
     assert all(1 in event["returned_doc_ids"] for event in events)
-    assert all(
-        event["original_doc_ids"] != event["returned_doc_ids"] for event in events
-    )
+    assert all(event["original_doc_ids"] != event["returned_doc_ids"] for event in events)
     assert all(event["requested_k"] == 2 for event in events)
     assert len(generator.calls) >= 1
     metrics = evaluate_noisy_attempts(system, (example_claim(),), {"101": result})

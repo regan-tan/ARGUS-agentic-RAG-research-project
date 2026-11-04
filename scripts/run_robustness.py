@@ -16,6 +16,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# The Standard RAG script already implements strict decoding of append-only records.
+# Reuse it rather than silently dropping token/timing fields during resume.
+from run_standard_rag import _record_to_attempt
+
 from argus.agents.argus import ArgusResult
 from argus.agents.argus import prompt_fingerprints as argus_prompts
 from argus.agents.iterative import IterativeRAGResult
@@ -47,10 +51,6 @@ from argus.rag.artifacts import (
 )
 from argus.rag.standard import build_messages
 from argus.retrieval import DEFAULT_QUERY_PREFIX, build_dense_retriever
-
-# The Standard RAG script already implements strict decoding of append-only records.
-# Reuse it rather than silently dropping token/timing fields during resume.
-from run_standard_rag import _record_to_attempt
 
 
 def parse_args() -> argparse.Namespace:
@@ -174,9 +174,7 @@ def main() -> int:
         identity = client.model_identity()
         dataset = load_scifact_dataset(args.data_dir)
         validate_scifact_dataset(dataset)
-        claims, mode = select_claims(
-            dataset.train_claims, seed=args.seed, pilot=args.pilot
-        )
+        claims, mode = select_claims(dataset.train_claims, seed=args.seed, pilot=args.pilot)
         retriever, build_info = build_dense_retriever(
             dataset.corpus, cache_dir=args.cache_dir, query_prefix=DEFAULT_QUERY_PREFIX
         )
