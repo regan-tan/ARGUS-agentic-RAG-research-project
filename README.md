@@ -332,6 +332,27 @@ identical output across Ollama/runtime/hardware versions. Iterative RAG must be 
 one-pass baseline rather than altering it. The next milestone is the multi-agent ARGUS system
 (Support/Challenge agents, Evidence Verifier, and Judge).
 
+## Challenge retrieval ablation (opt-in)
+
+By default the Challenge agent searches dense retrieval with the claim plus a fixed suffix. These
+options change only that search; Support stays on dense retrieval, and the Verifier and Judge never
+see which agent found a document:
+
+| Option | Values | Default |
+| --- | --- | --- |
+| `--challenge-retrieval` | `dense`, `bm25` | `dense` |
+| `--challenge-query` | `suffix`, `claim` | `suffix` |
+
+```cmd
+uv run --locked python scripts/run_argus.py --smoke-test --challenge-retrieval bm25 --challenge-query claim
+uv run --locked python scripts/run_argus.py --evaluate --challenge-retrieval bm25 --challenge-query claim
+```
+
+Without these options a run keeps its original `full` variant label. Otherwise `metadata.json`
+records a variant such as `bm25_claim`, an `implementation_version` ending in
+`-challenge-retrieval`, and the search under `retrieval.challenge`. Both options are rejected with
+`--no-challenge`. No claim that these options improve ARGUS is made until runs are complete.
+
 ## ARGUS v4 Judge reliability (opt-in)
 
 The original ARGUS v3 Judge, verifier, retrieval behavior, and historical outputs are preserved.

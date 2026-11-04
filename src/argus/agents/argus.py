@@ -37,6 +37,7 @@ MAX_JUDGE_EVIDENCE_REFERENCES = 10
 JUDGE_V4_VERSION = "argus-v4-judge"
 MAX_JUDGE_V4_EVIDENCE_REFERENCES = 3
 MAX_JUDGE_V4_SENTENCE_INDICES = 3
+CHALLENGE_QUERY_SUFFIX = "exceptions limitations conflicting findings alternative outcomes"
 CONCISE_REASONING_INSTRUCTION = (
     "Explain your reasoning in one sentence of at most 40 words. "
     "Be concise and do not repeat yourself."
@@ -95,6 +96,8 @@ class ArgusConfig:
     challenge_enabled: bool = True
     context_window_tokens: int | None = 8_192
     judge_version: Literal["v3", "v4"] = "v3"
+    challenge_retrieval: Literal["dense", "bm25"] = "dense"
+    challenge_query: Literal["suffix", "claim"] = "suffix"
 
     def __post_init__(self) -> None:
         if self.retrieval_k <= 0 or self.max_evidence_documents <= 0 or self.max_llm_calls <= 0:
@@ -105,9 +108,25 @@ class ArgusConfig:
             raise ValueError("context_window_tokens must be positive when supplied")
         if self.judge_version not in {"v3", "v4"}:
             raise ValueError("judge_version must be v3 or v4")
+        if self.challenge_retrieval not in {"dense", "bm25"}:
+            raise ValueError("challenge_retrieval must be dense or bm25")
+        if self.challenge_query not in {"suffix", "claim"}:
+            raise ValueError("challenge_query must be suffix or claim")
+        if not self.challenge_enabled and (
+            self.challenge_retrieval != "dense" or self.challenge_query != "suffix"
+        ):
+            raise ValueError("Challenge retrieval options require the Challenge agent")
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+    def variant(self) -> str:
+        """Name the ablation arm; the original configurations keep their recorded names."""
+        if not self.challenge_enabled:
+            return "no_challenge"
+        if self.challenge_retrieval == "dense" and self.challenge_query == "suffix":
+            return "full"
+        return f"{self.challenge_retrieval}_{self.challenge_query}"
 
 
 @dataclass(frozen=True)
@@ -653,8 +672,15 @@ class ArgusAgent:
         retriever: Retriever,
         generator: StructuredGenerator,
         config: ArgusConfig | None = None,
+        *,
+        challenge_retriever: Retriever | None = None,
     ) -> None:
         self.retriever, self.generator, self.config = retriever, generator, config or ArgusConfig()
+        if (self.config.challenge_retrieval == "dense") != (challenge_retriever is None):
+            raise ValueError(
+                "challenge_retriever must be supplied exactly when challenge_retrieval is not dense"
+            )
+        self.challenge_retriever = challenge_retriever or retriever
         graph = StateGraph(_State)
         graph.add_node("decompose", self._decompose)
         graph.add_node("support", self._support)
@@ -718,9 +744,10 @@ class ArgusAgent:
     def _retrieve(
         self, state: _State, agent: Literal["support", "challenge"], query: str
     ) -> dict[str, Any]:
+        retriever = self.challenge_retriever if agent == "challenge" else self.retriever
         started = time.perf_counter()
         try:
-            items = tuple(self.retriever.retrieve(query, self.config.retrieval_k))
+            items = tuple(retriever.retrieve(query, self.config.retrieval_k))
         except Exception as error:
             return {
                 "status": "retrieval_failure",
@@ -756,7 +783,11 @@ class ArgusAgent:
 
     def _challenge(self, state: _State) -> dict[str, Any]:
         objective = state["objectives"][0].text
-        query = f"{objective} exceptions limitations conflicting findings alternative outcomes"
+        query = (
+            objective
+            if self.config.challenge_query == "claim"
+            else f"{objective} {CHALLENGE_QUERY_SUFFIX}"
+        )
         updates = self._retrieve(state, "challenge", query)
         if updates.get("status") is None and not updates.get("challenge"):
             trace = list(cast(tuple[dict[str, Any], ...], updates["trace"]))

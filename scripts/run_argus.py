@@ -31,7 +31,12 @@ from argus.rag.artifacts import (
     load_json_object,
     load_prediction_records,
 )
-from argus.retrieval import DEFAULT_QUERY_PREFIX, build_dense_retriever
+from argus.retrieval import DEFAULT_QUERY_PREFIX, BM25Retriever, build_dense_retriever
+
+CHALLENGE_METHODS = {
+    "dense": "dense BGE-small plus FAISS IndexFlatIP",
+    "bm25": "BM25Okapi over the shared document text",
+}
 
 
 def arguments() -> argparse.Namespace:
@@ -44,6 +49,8 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--no-challenge", action="store_true")
     parser.add_argument("--judge-version", choices=("v3", "v4"), default="v3")
+    parser.add_argument("--challenge-retrieval", choices=("dense", "bm25"), default="dense")
+    parser.add_argument("--challenge-query", choices=("suffix", "claim"), default="suffix")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--max-evidence-documents", type=int, default=10)
@@ -89,6 +96,11 @@ def main() -> int:
     if args.limit is not None and args.limit <= 0:
         print("--limit must be positive", file=sys.stderr)
         return 2
+    if args.no_challenge and (
+        args.challenge_retrieval != "dense" or args.challenge_query != "suffix"
+    ):
+        print("--challenge-* options cannot be combined with --no-challenge", file=sys.stderr)
+        return 2
     config = ArgusConfig(
         retrieval_k=args.k,
         max_evidence_documents=args.max_evidence_documents,
@@ -96,6 +108,8 @@ def main() -> int:
         challenge_enabled=not args.no_challenge,
         context_window_tokens=args.num_ctx,
         judge_version=args.judge_version,
+        challenge_retrieval=args.challenge_retrieval,
+        challenge_query=args.challenge_query,
     )
     client = OllamaChatClient(
         model=args.model,
@@ -112,16 +126,22 @@ def main() -> int:
         retriever, build_info = build_dense_retriever(
             dataset.corpus, cache_dir=args.cache_dir, query_prefix=DEFAULT_QUERY_PREFIX
         )
+        challenge_retriever = (
+            BM25Retriever(dataset.corpus) if args.challenge_retrieval == "bm25" else None
+        )
     except (OllamaError, ValueError, OSError) as error:
         print(f"Preflight failed: {error}", file=sys.stderr)
         return 1
-    agent = ArgusAgent(retriever, client, config)
+    agent = ArgusAgent(retriever, client, config, challenge_retriever=challenge_retriever)
+    base_version = "argus-v4-judge" if args.judge_version == "v4" else "argus-v3"
     metadata = {
         "experiment": "Experiment 3 ARGUS",
         "implementation_version": (
-            "argus-v4-judge" if args.judge_version == "v4" else "argus-v3"
+            base_version
+            if config.variant() in {"full", "no_challenge"}
+            else f"{base_version}-challenge-retrieval"
         ),
-        "variant": "full" if config.challenge_enabled else "no_challenge",
+        "variant": config.variant(),
         "seed": args.seed,
         "agent": config.to_dict(),
         "prompts": prompt_fingerprints(args.judge_version),
@@ -130,6 +150,14 @@ def main() -> int:
             "k": args.k,
             "query_prefix": DEFAULT_QUERY_PREFIX,
             "corpus_fingerprint": build_info.corpus_fingerprint,
+            "challenge": (
+                {
+                    "method": CHALLENGE_METHODS[args.challenge_retrieval],
+                    "query": args.challenge_query,
+                }
+                if config.challenge_enabled
+                else None
+            ),
         },
         "generator": {
             "model": args.model,

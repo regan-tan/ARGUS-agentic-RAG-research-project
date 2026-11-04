@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from argus.agents.argus import (
+    CHALLENGE_QUERY_SUFFIX,
     CONCISE_REASONING_INSTRUCTION,
     JUDGE_SYSTEM_PROMPT,
     JUDGE_V4_SYSTEM_PROMPT,
@@ -30,6 +34,7 @@ from argus.agents.argus import (
 from argus.data.models import Claim, CorpusDocument, EvidenceAnnotation
 from argus.llm.ollama import GenerationMetadata, OllamaChatResponse
 from argus.rag.standard import response_json_schema
+from argus.retrieval import BM25Retriever
 from argus.retrieval.types import RetrievalResult
 
 
@@ -137,6 +142,229 @@ def test_no_challenge_performs_no_challenge_retrieval_or_inference() -> None:
     assert len(retriever.queries) == 1
     assert result.retrieval_calls == 1
     assert all(event.get("agent") != "challenge" for event in result.trace)
+
+
+class RecordingRetriever:
+    def __init__(self, *doc_ids: int) -> None:
+        self.doc_ids = doc_ids
+        self.queries: list[str] = []
+
+    def retrieve(self, query: str, k: int) -> tuple[RetrievalResult, ...]:
+        self.queries.append(query)
+        return tuple(item(doc_id) for doc_id in self.doc_ids[:k])
+
+
+class FailingRetriever:
+    def retrieve(self, query: str, k: int) -> tuple[RetrievalResult, ...]:
+        raise OSError("index unavailable")
+
+
+def insufficient_run(document_count: int) -> GeneratorStub:
+    verifications: list[object] = [
+        {"label": "INSUFFICIENT", "rationale": "Not direct.", "sentence_indices": []}
+    ] * document_count
+    return GeneratorStub(
+        [*verifications, {"verdict": "INSUFFICIENT", "rationale": "Not enough.", "evidence": []}]
+    )
+
+
+def test_default_challenge_configuration_keeps_recorded_dense_suffix_behavior() -> None:
+    retriever = RecordingRetriever(1, 2)
+    result = ArgusAgent(retriever, insufficient_run(2)).verify("A claim")
+    assert retriever.queries == [
+        "A claim",
+        "A claim exceptions limitations conflicting findings alternative outcomes",
+    ]
+    assert ArgusConfig().variant() == "full"
+    assert ArgusConfig(challenge_enabled=False).variant() == "no_challenge"
+    assert result.status == "success"
+
+
+def test_bm25_challenge_searches_claim_while_support_stays_on_dense() -> None:
+    dense, bm25 = RecordingRetriever(1, 2), RecordingRetriever(2, 3)
+    config = ArgusConfig(challenge_retrieval="bm25", challenge_query="claim")
+    generator = insufficient_run(3)
+    result = ArgusAgent(dense, generator, config, challenge_retriever=bm25).verify("A claim")
+    assert dense.queries == ["A claim"]
+    assert bm25.queries == ["A claim"]
+    assert [(entry.result.doc_id, entry.discovered_by) for entry in result.evidence] == [
+        (1, ("support",)),
+        (2, ("support", "challenge")),
+        (3, ("challenge",)),
+    ]
+    assert result.llm_calls == 4
+    assert config.variant() == "bm25_claim"
+    assert all("bm25" not in user.lower() and "challenge" not in user for user in generator.users)
+
+
+def test_challenge_query_choice_is_independent_of_the_retriever() -> None:
+    dense, bm25 = RecordingRetriever(1), RecordingRetriever(2)
+    config = ArgusConfig(challenge_retrieval="bm25")
+    ArgusAgent(dense, insufficient_run(2), config, challenge_retriever=bm25).verify("A claim")
+    assert bm25.queries == [f"A claim {CHALLENGE_QUERY_SUFFIX}"]
+    assert config.variant() == "bm25_suffix"
+    assert ArgusConfig(challenge_query="claim").variant() == "dense_claim"
+
+
+def test_real_bm25_retriever_satisfies_the_challenge_contract() -> None:
+    corpus = (
+        CorpusDocument(1, "Zebrafish fins", ("Regeneration of fins.",), False),
+        CorpusDocument(2, "Radioiodine goitre", ("Radioiodine reduces goitre volume.",), False),
+        CorpusDocument(3, "Mouse sleep", ("Sleep in mice.",), False),
+    )
+    config = ArgusConfig(retrieval_k=1, challenge_retrieval="bm25", challenge_query="claim")
+    agent = ArgusAgent(
+        RecordingRetriever(1),
+        insufficient_run(2),
+        config,
+        challenge_retriever=BM25Retriever(corpus),
+    )
+    result = agent.verify("Radioiodine changes goitre volume")
+    challenge = next(event for event in result.trace if event.get("agent") == "challenge")
+    assert challenge["retrieved_doc_ids"] == [2]
+    assert [entry.result.doc_id for entry in result.evidence] == [1, 2]
+
+
+def test_bm25_challenge_failure_is_recorded_without_a_verdict() -> None:
+    config = ArgusConfig(challenge_retrieval="bm25", challenge_query="claim")
+    generator = GeneratorStub([])
+    result = ArgusAgent(
+        RecordingRetriever(1), generator, config, challenge_retriever=FailingRetriever()
+    ).verify("A claim")
+    assert result.status == "retrieval_failure"
+    assert result.prediction is None
+    assert "challenge retrieval failed: index unavailable" in str(result.failure_message)
+    assert generator.users == []
+
+
+def test_challenge_retriever_must_match_the_recorded_configuration() -> None:
+    with pytest.raises(ValueError, match="challenge_retriever"):
+        ArgusAgent(
+            RecordingRetriever(1), GeneratorStub([]), ArgusConfig(challenge_retrieval="bm25")
+        )
+    with pytest.raises(ValueError, match="challenge_retriever"):
+        ArgusAgent(
+            RecordingRetriever(1), GeneratorStub([]), challenge_retriever=RecordingRetriever(2)
+        )
+
+
+@pytest.mark.parametrize("options", [{"challenge_retrieval": "bm25"}, {"challenge_query": "claim"}])
+def test_challenge_options_are_rejected_without_the_challenge_agent(
+    options: dict[str, str],
+) -> None:
+    with pytest.raises(ValueError, match="require the Challenge agent"):
+        ArgusConfig(challenge_enabled=False, **options)
+
+
+@pytest.mark.parametrize("options", [{"challenge_retrieval": "faiss"}, {"challenge_query": "not"}])
+def test_unknown_challenge_options_are_rejected(options: dict[str, str]) -> None:
+    with pytest.raises(ValueError, match="must be"):
+        ArgusConfig(**options)
+
+
+def _load_cli_module() -> ModuleType:
+    path = Path(__file__).resolve().parents[1] / "scripts" / "run_argus.py"
+    spec = importlib.util.spec_from_file_location("run_argus", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class FakeOllamaClient:
+    def __init__(self, **_: object) -> None:
+        pass
+
+    def model_identity(self) -> SimpleNamespace:
+        return SimpleNamespace(digest="fake-digest", to_dict=lambda: {"digest": "fake-digest"})
+
+    def chat(self, *, system: str, user: str, response_schema: object) -> OllamaChatResponse:
+        payload: dict[str, object] = (
+            {"verdict": "INSUFFICIENT", "rationale": "Not enough.", "evidence": []}
+            if system == JUDGE_SYSTEM_PROMPT
+            else {"label": "INSUFFICIENT", "rationale": "Not direct.", "sentence_indices": []}
+        )
+        return OllamaChatResponse(
+            json.dumps(payload), GenerationMetadata(10, 5, None, None, None, None, 0.01)
+        )
+
+
+def run_cli(
+    monkeypatch: pytest.MonkeyPatch, output_dir: Path, *flags: str
+) -> tuple[int, ModuleType]:
+    module = _load_cli_module()
+    corpus = (
+        CorpusDocument(1, "Zebrafish fins", ("Regeneration of fins.",), False),
+        CorpusDocument(2, "Radioiodine goitre", ("Radioiodine reduces goitre volume.",), False),
+        CorpusDocument(3, "Mouse sleep", ("Sleep in mice.",), False),
+    )
+    monkeypatch.setattr(module, "OllamaChatClient", FakeOllamaClient)
+    monkeypatch.setattr(module, "load_scifact_dataset", lambda _: SimpleNamespace(corpus=corpus))
+    monkeypatch.setattr(module, "validate_scifact_dataset", lambda _: None)
+    monkeypatch.setattr(
+        module,
+        "build_dense_retriever",
+        lambda *_, **__: (RecordingRetriever(1), SimpleNamespace(corpus_fingerprint="fingerprint")),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["run_argus.py", "--claim", "Radioiodine goitre", "--output-dir", str(output_dir), *flags],
+    )
+    return module.main(), module
+
+
+def read_cli_metadata(output_dir: Path) -> dict[str, object]:
+    run_dir = next(output_dir.iterdir())
+    return json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+
+
+def test_cli_records_the_bm25_claim_arm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    exit_code, module = run_cli(
+        monkeypatch,
+        tmp_path,
+        "--k",
+        "1",
+        "--challenge-retrieval",
+        "bm25",
+        "--challenge-query",
+        "claim",
+    )
+    assert exit_code == 0
+    metadata = read_cli_metadata(tmp_path)
+    assert metadata["variant"] == "bm25_claim"
+    assert metadata["implementation_version"] == "argus-v3-challenge-retrieval"
+    assert metadata["retrieval"]["method"] == "dense BGE-small plus FAISS IndexFlatIP"
+    assert metadata["retrieval"]["challenge"] == {
+        "method": module.CHALLENGE_METHODS["bm25"],
+        "query": "claim",
+    }
+    run_dir = next(tmp_path.iterdir())
+    record = json.loads((run_dir / "predictions.jsonl").read_text(encoding="utf-8"))
+    challenge = next(event for event in record["trace"] if event.get("agent") == "challenge")
+    assert challenge["query"] == "Radioiodine goitre"
+    assert challenge["retrieved_doc_ids"] == [2]
+
+
+def test_cli_without_challenge_flags_keeps_original_labels(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    exit_code, module = run_cli(monkeypatch, tmp_path)
+    assert exit_code == 0
+    metadata = read_cli_metadata(tmp_path)
+    assert metadata["variant"] == "full"
+    assert metadata["implementation_version"] == "argus-v3"
+    assert metadata["retrieval"]["challenge"] == {
+        "method": module.CHALLENGE_METHODS["dense"],
+        "query": "suffix",
+    }
+
+
+def test_cli_rejects_challenge_flags_with_no_challenge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    exit_code, _ = run_cli(monkeypatch, tmp_path, "--no-challenge", "--challenge-query", "claim")
+    assert exit_code == 2
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_no_retrieved_abstracts_are_distinct_from_invalid_verifier_responses() -> None:
