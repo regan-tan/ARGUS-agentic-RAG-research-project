@@ -107,9 +107,12 @@ class NoisyRetriever:
         self.base = base
         self.claim_id = claim_id
         self.config = config
-        self._protected = {
-            canonical_document_id(doc_id) for doc_id in (protected_doc_ids or ())
-        } if config.preserve_annotated_gold else set()
+        if config.preserve_annotated_gold:
+            self._protected = {
+                canonical_document_id(doc_id) for doc_id in (protected_doc_ids or ())
+            }
+        else:
+            self._protected = set()
         self._events: list[NoiseEvent] = []
 
     @property
