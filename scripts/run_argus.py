@@ -118,9 +118,7 @@ def main() -> int:
     agent = ArgusAgent(retriever, client, config)
     metadata = {
         "experiment": "Experiment 3 ARGUS",
-        "implementation_version": (
-            "argus-v4-judge" if args.judge_version == "v4" else "argus-v3"
-        ),
+        "implementation_version": ("argus-v4-judge" if args.judge_version == "v4" else "argus-v3"),
         "variant": "full" if config.challenge_enabled else "no_challenge",
         "seed": args.seed,
         "agent": config.to_dict(),

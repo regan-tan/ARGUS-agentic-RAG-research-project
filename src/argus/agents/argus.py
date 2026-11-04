@@ -970,9 +970,8 @@ class ArgusAgent:
                         raise ValidationError("invalid_response", "v4 Judge duplicated a document")
                     cited_ids.add(doc_id)
                     indices = reference["sentence_indices"]
-                    if (
-                        len(indices) > MAX_JUDGE_V4_SENTENCE_INDICES
-                        or len(set(indices)) != len(indices)
+                    if len(indices) > MAX_JUDGE_V4_SENTENCE_INDICES or len(set(indices)) != len(
+                        indices
                     ):
                         raise ValidationError(
                             "invalid_response",
