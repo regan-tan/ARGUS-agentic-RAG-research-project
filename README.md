@@ -340,7 +340,7 @@ see which agent found a document:
 
 | Option | Values | Default |
 | --- | --- | --- |
-| `--challenge-retrieval` | `dense`, `bm25` | `dense` |
+| `--challenge-retrieval` | `dense`, `bm25`, `hybrid` | `dense` |
 | `--challenge-query` | `suffix`, `claim` | `suffix` |
 | `--challenge-exclude-support` | flag | off |
 
@@ -348,9 +348,11 @@ see which agent found a document:
 uv run --locked python scripts/run_argus.py --smoke-test --challenge-retrieval bm25 --challenge-query claim
 uv run --locked python scripts/run_argus.py --evaluate --challenge-retrieval bm25 --challenge-query claim
 uv run --locked python scripts/run_argus.py --evaluate --challenge-query claim --challenge-exclude-support
+uv run --locked python scripts/run_argus.py --evaluate --challenge-retrieval hybrid --challenge-query claim --challenge-exclude-support
 ```
 
-`--challenge-exclude-support` makes Challenge return only documents Support did not find, up to
+`hybrid` is the existing reciprocal rank fusion of BM25 and dense rankings with its default
+settings. `--challenge-exclude-support` makes Challenge return only documents Support did not find, up to
 `--k`, so a claim verifies up to twice as many abstracts and uses more model calls. With dense
 retrieval and the claim as query, this returns Support's next-ranked documents, so treat that
 configuration as a "retrieve more" control rather than a search for counter-evidence.

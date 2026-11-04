@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from argus.agents.argus import (
     evaluate_argus_attempts,
     prompt_fingerprints,
 )
+from argus.data.models import CorpusDocument
 from argus.data.scifact import load_scifact_dataset
 from argus.data.validation import validate_scifact_dataset
 from argus.evaluation.verification import (
@@ -32,11 +34,23 @@ from argus.rag.artifacts import (
     load_prediction_records,
 )
 from argus.retrieval import DEFAULT_QUERY_PREFIX, BM25Retriever, build_dense_retriever
+from argus.retrieval.hybrid import HybridRetriever, Retriever
 
 CHALLENGE_METHODS = {
     "dense": "dense BGE-small plus FAISS IndexFlatIP",
     "bm25": "BM25Okapi over the shared document text",
+    "hybrid": "RRF of BM25Okapi and dense BGE-small with default candidate_pool and rrf_constant",
 }
+
+
+def build_challenge_retriever(
+    method: str, corpus: Sequence[CorpusDocument], dense: Retriever
+) -> Retriever | None:
+    """Return Challenge's own retriever, or None when it shares Support's dense retriever."""
+    if method == "dense":
+        return None
+    bm25 = BM25Retriever(corpus)
+    return bm25 if method == "bm25" else HybridRetriever(bm25, dense)
 
 
 def arguments() -> argparse.Namespace:
@@ -49,7 +63,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--no-challenge", action="store_true")
     parser.add_argument("--judge-version", choices=("v3", "v4"), default="v3")
-    parser.add_argument("--challenge-retrieval", choices=("dense", "bm25"), default="dense")
+    parser.add_argument("--challenge-retrieval", choices=tuple(CHALLENGE_METHODS), default="dense")
     parser.add_argument("--challenge-query", choices=("suffix", "claim"), default="suffix")
     parser.add_argument("--challenge-exclude-support", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
@@ -130,8 +144,8 @@ def main() -> int:
         retriever, build_info = build_dense_retriever(
             dataset.corpus, cache_dir=args.cache_dir, query_prefix=DEFAULT_QUERY_PREFIX
         )
-        challenge_retriever = (
-            BM25Retriever(dataset.corpus) if args.challenge_retrieval == "bm25" else None
+        challenge_retriever = build_challenge_retriever(
+            args.challenge_retrieval, dataset.corpus, retriever
         )
     except (OllamaError, ValueError, OSError) as error:
         print(f"Preflight failed: {error}", file=sys.stderr)

@@ -96,7 +96,7 @@ class ArgusConfig:
     challenge_enabled: bool = True
     context_window_tokens: int | None = 8_192
     judge_version: Literal["v3", "v4"] = "v3"
-    challenge_retrieval: Literal["dense", "bm25"] = "dense"
+    challenge_retrieval: Literal["dense", "bm25", "hybrid"] = "dense"
     challenge_query: Literal["suffix", "claim"] = "suffix"
     challenge_exclude_support: bool = False
 
@@ -109,8 +109,8 @@ class ArgusConfig:
             raise ValueError("context_window_tokens must be positive when supplied")
         if self.judge_version not in {"v3", "v4"}:
             raise ValueError("judge_version must be v3 or v4")
-        if self.challenge_retrieval not in {"dense", "bm25"}:
-            raise ValueError("challenge_retrieval must be dense or bm25")
+        if self.challenge_retrieval not in {"dense", "bm25", "hybrid"}:
+            raise ValueError("challenge_retrieval must be dense, bm25, or hybrid")
         if self.challenge_query not in {"suffix", "claim"}:
             raise ValueError("challenge_query must be suffix or claim")
         if not self.challenge_enabled and (

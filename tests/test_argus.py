@@ -35,7 +35,7 @@ from argus.agents.argus import (
 from argus.data.models import Claim, CorpusDocument, EvidenceAnnotation
 from argus.llm.ollama import GenerationMetadata, OllamaChatResponse
 from argus.rag.standard import response_json_schema
-from argus.retrieval import BM25Retriever
+from argus.retrieval import BM25Retriever, HybridRetriever
 from argus.retrieval.types import RetrievalResult
 
 
@@ -340,6 +340,34 @@ def test_exclude_support_works_with_a_separate_challenge_retriever() -> None:
     assert config.variant() == "bm25_claim_exclude"
 
 
+def test_hybrid_challenge_excludes_support_and_keeps_support_on_dense() -> None:
+    dense = RecordingRetriever(1, 2, 3)
+    bm25 = RecordingRetriever(4, 3, 1)
+    hybrid = HybridRetriever(bm25, dense)
+    config = ArgusConfig(
+        retrieval_k=1,
+        challenge_retrieval="hybrid",
+        challenge_query="claim",
+        challenge_exclude_support=True,
+    )
+    result = ArgusAgent(dense, insufficient_run(2), config, challenge_retriever=hybrid).verify(
+        "A claim"
+    )
+    assert dense.requested_k == [1, 50]
+    assert bm25.requested_k == [50]
+    challenge = next(event for event in result.trace if event.get("agent") == "challenge")
+    assert challenge["requested_k"] == 2
+    assert challenge["excluded_doc_ids"] == [1]
+    assert len(challenge["retrieved_doc_ids"]) == 1
+    assert 1 not in challenge["retrieved_doc_ids"]
+    assert [(entry.result.doc_id, entry.discovered_by) for entry in result.evidence][0] == (
+        1,
+        ("support",),
+    )
+    assert result.evidence[1].result.rank == 1
+    assert config.variant() == "hybrid_claim_exclude"
+
+
 def test_exclude_support_with_default_query_is_not_labelled_full() -> None:
     assert ArgusConfig(challenge_exclude_support=True).variant() == "dense_suffix_exclude"
 
@@ -479,6 +507,49 @@ def test_cli_records_the_exclude_support_arm(
         "query": "claim",
         "exclude_support": True,
     }
+
+
+def test_cli_records_the_hybrid_exclude_arm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    exit_code, module = run_cli(
+        monkeypatch,
+        tmp_path,
+        "--k",
+        "1",
+        "--challenge-retrieval",
+        "hybrid",
+        "--challenge-query",
+        "claim",
+        "--challenge-exclude-support",
+    )
+    assert exit_code == 0
+    metadata = read_cli_metadata(tmp_path)
+    assert metadata["variant"] == "hybrid_claim_exclude"
+    assert metadata["implementation_version"] == "argus-v3-challenge-retrieval"
+    assert metadata["retrieval"]["method"] == "dense BGE-small plus FAISS IndexFlatIP"
+    assert metadata["retrieval"]["challenge"] == {
+        "method": module.CHALLENGE_METHODS["hybrid"],
+        "query": "claim",
+        "exclude_support": True,
+    }
+    record = json.loads(
+        (next(tmp_path.iterdir()) / "predictions.jsonl").read_text(encoding="utf-8")
+    )
+    challenge = next(event for event in record["trace"] if event.get("agent") == "challenge")
+    assert challenge["retrieved_doc_ids"] == [2]
+
+
+def test_build_challenge_retriever_matches_the_requested_method() -> None:
+    module = _load_cli_module()
+    corpus = (CorpusDocument(1, "Paper", ("Sentence.",), False),)
+    dense = RecordingRetriever(1)
+    assert module.build_challenge_retriever("dense", corpus, dense) is None
+    assert isinstance(module.build_challenge_retriever("bm25", corpus, dense), BM25Retriever)
+    hybrid = module.build_challenge_retriever("hybrid", corpus, dense)
+    assert isinstance(hybrid, HybridRetriever)
+    assert hybrid.dense is dense
+    assert (hybrid.candidate_pool, hybrid.rrf_constant) == (50, 60)
 
 
 def test_cli_rejects_exclude_support_with_no_challenge(
