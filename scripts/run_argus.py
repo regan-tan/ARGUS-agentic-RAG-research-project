@@ -51,6 +51,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--judge-version", choices=("v3", "v4"), default="v3")
     parser.add_argument("--challenge-retrieval", choices=("dense", "bm25"), default="dense")
     parser.add_argument("--challenge-query", choices=("suffix", "claim"), default="suffix")
+    parser.add_argument("--challenge-exclude-support", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--max-evidence-documents", type=int, default=10)
@@ -97,7 +98,9 @@ def main() -> int:
         print("--limit must be positive", file=sys.stderr)
         return 2
     if args.no_challenge and (
-        args.challenge_retrieval != "dense" or args.challenge_query != "suffix"
+        args.challenge_retrieval != "dense"
+        or args.challenge_query != "suffix"
+        or args.challenge_exclude_support
     ):
         print("--challenge-* options cannot be combined with --no-challenge", file=sys.stderr)
         return 2
@@ -110,6 +113,7 @@ def main() -> int:
         judge_version=args.judge_version,
         challenge_retrieval=args.challenge_retrieval,
         challenge_query=args.challenge_query,
+        challenge_exclude_support=args.challenge_exclude_support,
     )
     client = OllamaChatClient(
         model=args.model,
@@ -154,6 +158,7 @@ def main() -> int:
                 {
                     "method": CHALLENGE_METHODS[args.challenge_retrieval],
                     "query": args.challenge_query,
+                    "exclude_support": args.challenge_exclude_support,
                 }
                 if config.challenge_enabled
                 else None

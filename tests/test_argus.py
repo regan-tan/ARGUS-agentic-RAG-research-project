@@ -26,6 +26,7 @@ from argus.agents.argus import (
     ArgusResult,
     _parse_verification,
     evaluate_argus_attempts,
+    exclude_documents,
     judge_json_schema,
     merge_evidence,
     prompt_fingerprints,
@@ -148,9 +149,11 @@ class RecordingRetriever:
     def __init__(self, *doc_ids: int) -> None:
         self.doc_ids = doc_ids
         self.queries: list[str] = []
+        self.requested_k: list[int] = []
 
     def retrieve(self, query: str, k: int) -> tuple[RetrievalResult, ...]:
         self.queries.append(query)
+        self.requested_k.append(k)
         return tuple(item(doc_id) for doc_id in self.doc_ids[:k])
 
 
@@ -178,6 +181,10 @@ def test_default_challenge_configuration_keeps_recorded_dense_suffix_behavior() 
     assert ArgusConfig().variant() == "full"
     assert ArgusConfig(challenge_enabled=False).variant() == "no_challenge"
     assert result.status == "success"
+    assert retriever.requested_k == [5, 5]
+    challenge = next(event for event in result.trace if event.get("agent") == "challenge")
+    assert "excluded_doc_ids" not in challenge
+    assert "requested_k" not in challenge
 
 
 def test_bm25_challenge_searches_claim_while_support_stays_on_dense() -> None:
@@ -248,9 +255,105 @@ def test_challenge_retriever_must_match_the_recorded_configuration() -> None:
         )
 
 
-@pytest.mark.parametrize("options", [{"challenge_retrieval": "bm25"}, {"challenge_query": "claim"}])
+def ranked(*doc_ids: int | str) -> tuple[RetrievalResult, ...]:
+    return tuple(
+        RetrievalResult(
+            doc_id,
+            1.0 / rank,
+            rank,
+            CorpusDocument(doc_id, f"Paper {doc_id}", ("Evidence sentence.",), False),
+        )
+        for rank, doc_id in enumerate(doc_ids, start=1)
+    )
+
+
+def test_exclude_documents_keeps_order_scores_and_renumbers_ranks() -> None:
+    results = ranked(1, 2, 3, 4)
+    kept = exclude_documents(results, ranked(1, 3), 5)
+    assert [(entry.doc_id, entry.rank, entry.score) for entry in kept] == [
+        (2, 1, 0.5),
+        (4, 2, 0.25),
+    ]
+    assert [entry.rank for entry in results] == [1, 2, 3, 4]
+
+
+def test_exclude_documents_applies_limit_and_canonical_ids() -> None:
+    kept = exclude_documents(ranked(1, "2", 3, 4), ranked("1", 2), 1)
+    assert [(entry.doc_id, entry.rank) for entry in kept] == [(3, 1)]
+
+
+def test_exclude_support_fetches_enough_and_returns_only_new_documents() -> None:
+    dense = RecordingRetriever(1, 2, 3, 4, 5, 6, 7)
+    config = ArgusConfig(retrieval_k=2, challenge_query="claim", challenge_exclude_support=True)
+    result = ArgusAgent(dense, insufficient_run(4), config).verify("A claim")
+    assert dense.queries == ["A claim", "A claim"]
+    assert dense.requested_k == [2, 4]
+    challenge = next(event for event in result.trace if event.get("agent") == "challenge")
+    assert challenge["retrieved_doc_ids"] == [3, 4]
+    assert challenge["k"] == 2
+    assert challenge["requested_k"] == 4
+    assert challenge["excluded_doc_ids"] == [1, 2]
+    assert [(entry.result.doc_id, entry.discovered_by) for entry in result.evidence] == [
+        (1, ("support",)),
+        (2, ("support",)),
+        (3, ("challenge",)),
+        (4, ("challenge",)),
+    ]
+    assert [entry.result.rank for entry in result.evidence[2:]] == [1, 2]
+    assert config.variant() == "dense_claim_exclude"
+
+
+def test_exclude_support_full_evidence_load_stays_within_the_llm_budget() -> None:
+    dense = RecordingRetriever(*range(1, 11))
+    config = ArgusConfig(challenge_query="claim", challenge_exclude_support=True)
+    generator = insufficient_run(10)
+    result = ArgusAgent(dense, generator, config).verify("A claim")
+    assert len(result.evidence) == 10
+    assert result.llm_calls == 11
+    assert result.status == "success"
+
+
+def test_exclude_support_records_outcome_when_nothing_new_exists() -> None:
+    config = ArgusConfig(challenge_query="claim", challenge_exclude_support=True)
+    result = ArgusAgent(RecordingRetriever(1), insufficient_run(1), config).verify("A claim")
+    challenge = next(event for event in result.trace if event.get("agent") == "challenge")
+    assert challenge["retrieved_doc_ids"] == []
+    assert challenge["outcome"] == "no_reliable_counter_evidence_found"
+    assert result.status == "success"
+
+
+def test_exclude_support_works_with_a_separate_challenge_retriever() -> None:
+    dense, bm25 = RecordingRetriever(1, 2), RecordingRetriever(2, 3, 4)
+    config = ArgusConfig(
+        retrieval_k=2,
+        challenge_retrieval="bm25",
+        challenge_query="claim",
+        challenge_exclude_support=True,
+    )
+    result = ArgusAgent(dense, insufficient_run(4), config, challenge_retriever=bm25).verify(
+        "A claim"
+    )
+    assert dense.requested_k == [2]
+    assert bm25.requested_k == [4]
+    challenge = next(event for event in result.trace if event.get("agent") == "challenge")
+    assert challenge["retrieved_doc_ids"] == [3, 4]
+    assert config.variant() == "bm25_claim_exclude"
+
+
+def test_exclude_support_with_default_query_is_not_labelled_full() -> None:
+    assert ArgusConfig(challenge_exclude_support=True).variant() == "dense_suffix_exclude"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"challenge_retrieval": "bm25"},
+        {"challenge_query": "claim"},
+        {"challenge_exclude_support": True},
+    ],
+)
 def test_challenge_options_are_rejected_without_the_challenge_agent(
-    options: dict[str, str],
+    options: dict[str, object],
 ) -> None:
     with pytest.raises(ValueError, match="require the Challenge agent"):
         ArgusConfig(challenge_enabled=False, **options)
@@ -337,6 +440,7 @@ def test_cli_records_the_bm25_claim_arm(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert metadata["retrieval"]["challenge"] == {
         "method": module.CHALLENGE_METHODS["bm25"],
         "query": "claim",
+        "exclude_support": False,
     }
     run_dir = next(tmp_path.iterdir())
     record = json.loads((run_dir / "predictions.jsonl").read_text(encoding="utf-8"))
@@ -356,7 +460,33 @@ def test_cli_without_challenge_flags_keeps_original_labels(
     assert metadata["retrieval"]["challenge"] == {
         "method": module.CHALLENGE_METHODS["dense"],
         "query": "suffix",
+        "exclude_support": False,
     }
+
+
+def test_cli_records_the_exclude_support_arm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    exit_code, module = run_cli(
+        monkeypatch, tmp_path, "--challenge-query", "claim", "--challenge-exclude-support"
+    )
+    assert exit_code == 0
+    metadata = read_cli_metadata(tmp_path)
+    assert metadata["variant"] == "dense_claim_exclude"
+    assert metadata["implementation_version"] == "argus-v3-challenge-retrieval"
+    assert metadata["retrieval"]["challenge"] == {
+        "method": module.CHALLENGE_METHODS["dense"],
+        "query": "claim",
+        "exclude_support": True,
+    }
+
+
+def test_cli_rejects_exclude_support_with_no_challenge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    exit_code, _ = run_cli(monkeypatch, tmp_path, "--no-challenge", "--challenge-exclude-support")
+    assert exit_code == 2
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_cli_rejects_challenge_flags_with_no_challenge(

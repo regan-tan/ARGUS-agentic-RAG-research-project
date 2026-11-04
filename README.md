@@ -342,15 +342,22 @@ see which agent found a document:
 | --- | --- | --- |
 | `--challenge-retrieval` | `dense`, `bm25` | `dense` |
 | `--challenge-query` | `suffix`, `claim` | `suffix` |
+| `--challenge-exclude-support` | flag | off |
 
 ```cmd
 uv run --locked python scripts/run_argus.py --smoke-test --challenge-retrieval bm25 --challenge-query claim
 uv run --locked python scripts/run_argus.py --evaluate --challenge-retrieval bm25 --challenge-query claim
+uv run --locked python scripts/run_argus.py --evaluate --challenge-query claim --challenge-exclude-support
 ```
+
+`--challenge-exclude-support` makes Challenge return only documents Support did not find, up to
+`--k`, so a claim verifies up to twice as many abstracts and uses more model calls. With dense
+retrieval and the claim as query, this returns Support's next-ranked documents, so treat that
+configuration as a "retrieve more" control rather than a search for counter-evidence.
 
 Without these options a run keeps its original `full` variant label. Otherwise `metadata.json`
 records a variant such as `bm25_claim`, an `implementation_version` ending in
-`-challenge-retrieval`, and the search under `retrieval.challenge`. Both options are rejected with
+`-challenge-retrieval`, and the search under `retrieval.challenge`. All three are rejected with
 `--no-challenge`. No claim that these options improve ARGUS is made until runs are complete.
 
 ## ARGUS v4 Judge reliability (opt-in)

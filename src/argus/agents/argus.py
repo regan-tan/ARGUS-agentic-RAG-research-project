@@ -12,7 +12,7 @@ import json
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
@@ -98,6 +98,7 @@ class ArgusConfig:
     judge_version: Literal["v3", "v4"] = "v3"
     challenge_retrieval: Literal["dense", "bm25"] = "dense"
     challenge_query: Literal["suffix", "claim"] = "suffix"
+    challenge_exclude_support: bool = False
 
     def __post_init__(self) -> None:
         if self.retrieval_k <= 0 or self.max_evidence_documents <= 0 or self.max_llm_calls <= 0:
@@ -113,7 +114,9 @@ class ArgusConfig:
         if self.challenge_query not in {"suffix", "claim"}:
             raise ValueError("challenge_query must be suffix or claim")
         if not self.challenge_enabled and (
-            self.challenge_retrieval != "dense" or self.challenge_query != "suffix"
+            self.challenge_retrieval != "dense"
+            or self.challenge_query != "suffix"
+            or self.challenge_exclude_support
         ):
             raise ValueError("Challenge retrieval options require the Challenge agent")
 
@@ -124,9 +127,14 @@ class ArgusConfig:
         """Name the ablation arm; the original configurations keep their recorded names."""
         if not self.challenge_enabled:
             return "no_challenge"
-        if self.challenge_retrieval == "dense" and self.challenge_query == "suffix":
+        if (
+            self.challenge_retrieval == "dense"
+            and self.challenge_query == "suffix"
+            and not self.challenge_exclude_support
+        ):
             return "full"
-        return f"{self.challenge_retrieval}_{self.challenge_query}"
+        name = f"{self.challenge_retrieval}_{self.challenge_query}"
+        return f"{name}_exclude" if self.challenge_exclude_support else name
 
 
 @dataclass(frozen=True)
@@ -352,6 +360,15 @@ def prompt_fingerprints(
             "system_prompt_sha256": _sha256(judge_prompt),
         },
     }
+
+
+def exclude_documents(
+    results: Sequence[RetrievalResult], excluded: Sequence[RetrievalResult], limit: int
+) -> tuple[RetrievalResult, ...]:
+    """Drop already-found documents, keep ranked order, and renumber ranks from 1."""
+    excluded_ids = {canonical_document_id(item.doc_id) for item in excluded}
+    kept = [item for item in results if canonical_document_id(item.doc_id) not in excluded_ids]
+    return tuple(replace(item, rank=rank) for rank, item in enumerate(kept[:limit], start=1))
 
 
 def merge_evidence(
@@ -742,12 +759,19 @@ class ArgusAgent:
         }
 
     def _retrieve(
-        self, state: _State, agent: Literal["support", "challenge"], query: str
+        self,
+        state: _State,
+        agent: Literal["support", "challenge"],
+        query: str,
+        exclude: Sequence[RetrievalResult] = (),
     ) -> dict[str, Any]:
         retriever = self.challenge_retriever if agent == "challenge" else self.retriever
+        requested_k = self.config.retrieval_k + len(exclude)
         started = time.perf_counter()
         try:
-            items = tuple(retriever.retrieve(query, self.config.retrieval_k))
+            items = tuple(retriever.retrieve(query, requested_k))
+            if exclude:
+                items = exclude_documents(items, exclude, self.config.retrieval_k)
         except Exception as error:
             return {
                 "status": "retrieval_failure",
@@ -774,6 +798,14 @@ class ArgusAgent:
                     "k": self.config.retrieval_k,
                     "retrieved_doc_ids": [item.doc_id for item in items],
                     "latency_seconds": time.perf_counter() - started,
+                    **(
+                        {
+                            "requested_k": requested_k,
+                            "excluded_doc_ids": [item.doc_id for item in exclude],
+                        }
+                        if exclude
+                        else {}
+                    ),
                 },
             ),
         }
@@ -788,7 +820,8 @@ class ArgusAgent:
             if self.config.challenge_query == "claim"
             else f"{objective} {CHALLENGE_QUERY_SUFFIX}"
         )
-        updates = self._retrieve(state, "challenge", query)
+        exclude = state["support"] if self.config.challenge_exclude_support else ()
+        updates = self._retrieve(state, "challenge", query, exclude)
         if updates.get("status") is None and not updates.get("challenge"):
             trace = list(cast(tuple[dict[str, Any], ...], updates["trace"]))
             trace[-1]["outcome"] = "no_reliable_counter_evidence_found"
