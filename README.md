@@ -331,3 +331,48 @@ scientific truth. Temperature zero and pinned settings improve reproducibility b
 identical output across Ollama/runtime/hardware versions. Iterative RAG must be evaluated against the
 one-pass baseline rather than altering it. The next milestone is the multi-agent ARGUS system
 (Support/Challenge agents, Evidence Verifier, and Judge).
+
+## Robustness experiment: retrieval noise (development protocol)
+
+The `feature/argus-robustness-eval` branch introduces a **CPU-only preflight**, not a new
+reported LLM benchmark. The base Standard, Iterative and ARGUS v3 implementations stay untouched.
+
+`NoisyRetriever` is a claim-scoped wrapper around the existing retriever contract. For noise
+level 0 it delegates a single unmodified `retrieve(query, k)` call. For noise levels 1, 2,
+and 3, it queries a larger *same-query* candidate pool and deterministically substitutes
+that many non-gold top-k slots with lower-ranked SciFact documents. The wrapper preserves
+original document IDs, text, zero-based sentence indices, and top-k output size. It
+protects any *already retrieved* annotated gold documents in labeled experimental claims
+but cannot manufacture missing gold evidence. Missing candidates are reported as an
+under-delivered noise dose. Each retrieval call, including rewrites and Challenge queries
+once integrated, must use the same policy and emit an audit event.
+
+**Scientific caveat:** Lower-ranked, unannotated SciFact documents are *retrieval-plausible
+distractor candidates*, not verified false statements or proven non-entailing documents.
+Manually inspect a fixed sample for topicality and entailment before describing the
+intervention as adversarial. Gold annotations are only used in the perturbation/evaluation
+wrapper, never passed into model inputs or prompts.
+
+Test without Ollama, GPUs, or downloaded SciFact data:
+
+```cmd
+uv run --locked pytest -q tests/test_robustness.py
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+```
+
+Then prepare a small development-only, CPU retrieval manifest (requires downloaded SciFact
+data and the pinned BGE encoder/retrieval cache):
+
+```cmd
+uv run --locked python scripts/prepare_robustness.py --limit 5
+```
+
+The command writes a new timestamped `outputs/robustness/preflight/` directory with
+`metadata.json` and `perturbations.jsonl`. Inspect actual substitutions, under-delivered
+noise, and whether the supposedly misleading documents are genuinely relevant-looking.
+
+**Remaining integration work:** Run the frozen protocol inside all three inference systems
+with independent claim-scoped wrappers and collect model/citation/cost outcomes for each noise
+level; keep v3 Judge fixed until Judge v4 ablations have been reported separately. No claim of
+improved robustness is justified by the CPU preflight alone.
