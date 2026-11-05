@@ -108,7 +108,7 @@ class ArgusConfig:
     max_llm_calls: int = 12
     challenge_enabled: bool = True
     context_window_tokens: int | None = 8_192
-    judge_version: Literal["v3", "v4"] = "v3"
+    judge_version: Literal["v3", "v4", "v4.1"] = "v3"
     challenge_retrieval: Literal["dense", "bm25", "hybrid"] = "dense"
     challenge_query: Literal["suffix", "claim", "counter_hypothesis"] = "suffix"
     challenge_exclude_support: bool = False
@@ -120,8 +120,8 @@ class ArgusConfig:
             )
         if self.context_window_tokens is not None and self.context_window_tokens <= 0:
             raise ValueError("context_window_tokens must be positive when supplied")
-        if self.judge_version not in {"v3", "v4"}:
-            raise ValueError("judge_version must be v3 or v4")
+        if self.judge_version not in {"v3", "v4", "v4.1"}:
+            raise ValueError("judge_version must be v3, v4, or v4.1")
         if self.challenge_retrieval not in {"dense", "bm25", "hybrid"}:
             raise ValueError("challenge_retrieval must be dense, bm25, or hybrid")
         if self.challenge_query not in {"suffix", "claim", "counter_hypothesis"}:
@@ -324,12 +324,12 @@ def verifier_json_schema() -> dict[str, object]:
 def judge_json_schema(
     max_evidence_references: int = MAX_JUDGE_EVIDENCE_REFERENCES,
     *,
-    version: Literal["v3", "v4"] = "v3",
+    version: Literal["v3", "v4", "v4.1"] = "v3",
 ) -> dict[str, object]:
     """Return a versioned Judge schema while preserving the original v3 contract."""
 
     sentence_indices: dict[str, object] = {"type": "array", "items": {"type": "integer"}}
-    if version == "v4":
+    if version in {"v4", "v4.1"}:
         max_evidence_references = min(max_evidence_references, MAX_JUDGE_V4_EVIDENCE_REFERENCES)
         sentence_indices.update(minItems=1, maxItems=MAX_JUDGE_V4_SENTENCE_INDICES)
 
@@ -360,10 +360,10 @@ def _sha256(value: str) -> str:
 
 
 def prompt_fingerprints(
-    judge_version: Literal["v3", "v4"] = "v3",
+    judge_version: Literal["v3", "v4", "v4.1"] = "v3",
     challenge_query: str = "suffix",
 ) -> dict[str, dict[str, str]]:
-    judge_prompt = JUDGE_V4_SYSTEM_PROMPT if judge_version == "v4" else JUDGE_SYSTEM_PROMPT
+    judge_prompt = JUDGE_V4_SYSTEM_PROMPT if judge_version != "v3" else JUDGE_SYSTEM_PROMPT
     query_prompt = (
         {
             "challenge_query": {
@@ -381,7 +381,7 @@ def prompt_fingerprints(
             "system_prompt_sha256": _sha256(VERIFIER_SYSTEM_PROMPT),
         },
         "judge": {
-            "version": JUDGE_V4_VERSION if judge_version == "v4" else PROMPT_VERSION,
+            "version": JUDGE_V4_VERSION if judge_version != "v3" else PROMPT_VERSION,
             "system_prompt_sha256": _sha256(judge_prompt),
         },
     }
@@ -1070,7 +1070,7 @@ class ArgusAgent:
             f"<claim>\n{state['claim']}\n</claim>\n\n<verified_evidence>\n"
             f"{rendered_blocks}\n</verified_evidence>"
         )
-        is_v4 = self.config.judge_version == "v4"
+        is_v4 = self.config.judge_version in {"v4", "v4.1"}
         response, event, failure = self._chat(
             state,
             "judge",
@@ -1088,7 +1088,7 @@ class ArgusAgent:
             )
         try:
             verdict = validate_response(response.content, allowed)
-            if is_v4:
+            if self.config.judge_version == "v4":
                 raw_evidence = json.loads(response.content)["evidence"]
                 if len(raw_evidence) > MAX_JUDGE_V4_EVIDENCE_REFERENCES:
                     raise ValidationError("invalid_response", "v4 Judge cited too many documents")
@@ -1099,14 +1099,56 @@ class ArgusAgent:
                         raise ValidationError("invalid_response", "v4 Judge duplicated a document")
                     cited_ids.add(doc_id)
                     indices = reference["sentence_indices"]
-                    if (
-                        len(indices) > MAX_JUDGE_V4_SENTENCE_INDICES
-                        or len(set(indices)) != len(indices)
+                    if len(indices) > MAX_JUDGE_V4_SENTENCE_INDICES or len(set(indices)) != len(
+                        indices
                     ):
                         raise ValidationError(
                             "invalid_response",
                             "v4 Judge citation indices exceed the limit or contain duplicates",
                         )
+            elif self.config.judge_version == "v4.1":
+                raw_evidence = json.loads(response.content)["evidence"]
+                if len(raw_evidence) > MAX_JUDGE_V4_EVIDENCE_REFERENCES:
+                    raise ValidationError(
+                        "invalid_response", "v4.1 Judge cited too many references"
+                    )
+
+                seen_pairs: set[tuple[str, int]] = set()
+                for reference in raw_evidence:
+                    doc_id = canonical_document_id(reference["doc_id"])
+                    indices = reference["sentence_indices"]
+
+                    if len(indices) > MAX_JUDGE_V4_SENTENCE_INDICES or len(set(indices)) != len(
+                        indices
+                    ):
+                        raise ValidationError(
+                            "invalid_response",
+                            "v4.1 Judge citation indices exceed the limit or contain duplicates",
+                        )
+
+                    for index in indices:
+                        pair = (doc_id, index)
+                        if pair in seen_pairs:
+                            raise ValidationError(
+                                "invalid_response",
+                                "v4.1 Judge repeated a document/sentence pair",
+                            )
+                        seen_pairs.add(pair)
+
+                if len(verdict.evidence) > MAX_JUDGE_V4_EVIDENCE_REFERENCES or any(
+                    len(ref.sentence_indices) > MAX_JUDGE_V4_SENTENCE_INDICES
+                    for ref in verdict.evidence
+                ):
+                    raise ValidationError(
+                        "invalid_response",
+                        "v4.1 Judge exceeded normalized citation limits",
+                    )
+
+                event["citation_normalization"] = {
+                    "applied": len(raw_evidence) != len(verdict.evidence),
+                    "raw_reference_count": len(raw_evidence),
+                    "normalized_document_count": len(verdict.evidence),
+                }
         except ValidationError as error:
             event["error"] = str(error)
             return self._failure(

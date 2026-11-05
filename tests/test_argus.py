@@ -547,7 +547,7 @@ class FakeOllamaClient:
             {"query": "goitre radioiodine no effect"}
             if system == CHALLENGE_QUERY_SYSTEM_PROMPT
             else {"verdict": "INSUFFICIENT", "rationale": "Not enough.", "evidence": []}
-            if system == JUDGE_SYSTEM_PROMPT
+            if system in {JUDGE_SYSTEM_PROMPT, JUDGE_V4_SYSTEM_PROMPT}
             else {"label": "INSUFFICIENT", "rationale": "Not direct.", "sentence_indices": []}
         )
         return OllamaChatResponse(
@@ -685,6 +685,53 @@ def test_build_challenge_retriever_matches_the_requested_method() -> None:
     assert isinstance(hybrid, HybridRetriever)
     assert hybrid.dense is dense
     assert (hybrid.candidate_pool, hybrid.rrf_constant) == (50, 60)
+
+
+def test_cli_records_challenge_arm_on_the_v41_judge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    exit_code, module = run_cli(
+        monkeypatch,
+        tmp_path,
+        "--k",
+        "1",
+        "--judge-version",
+        "v4.1",
+        "--challenge-retrieval",
+        "bm25",
+        "--challenge-query",
+        "claim",
+    )
+    assert exit_code == 0
+    metadata = read_cli_metadata(tmp_path)
+    assert metadata["variant"] == "bm25_claim"
+    assert metadata["agent"]["judge_version"] == "v4.1"
+    assert (
+        metadata["implementation_version"]
+        == "argus-v4.1-citation-normalization-challenge-retrieval"
+    )
+    assert metadata["prompts"]["judge"]["version"] == JUDGE_V4_VERSION
+    assert metadata["retrieval"]["challenge"] == {
+        "method": module.CHALLENGE_METHODS["bm25"],
+        "query": "claim",
+        "exclude_support": False,
+    }
+    record = json.loads(
+        (next(tmp_path.iterdir()) / "predictions.jsonl").read_text(encoding="utf-8")
+    )
+    assert record["status"] == "success"
+    judge = next(event for event in record["trace"] if event.get("purpose") == "judge")
+    assert judge["citation_normalization"]["applied"] is False
+
+
+def test_cli_v41_without_challenge_flags_keeps_base_version_label(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    exit_code, _ = run_cli(monkeypatch, tmp_path, "--judge-version", "v4.1")
+    assert exit_code == 0
+    metadata = read_cli_metadata(tmp_path)
+    assert metadata["variant"] == "full"
+    assert metadata["implementation_version"] == "argus-v4.1-citation-normalization"
 
 
 def test_cli_records_the_counter_hypothesis_arm(
@@ -1002,3 +1049,75 @@ def test_v4_judge_truncated_json_is_recorded_without_retry() -> None:
     assert result.llm_calls == 2
     assert result.raw_response is not None
     assert result.trace[-1]["purpose"] == "judge"
+
+
+class MultiSentenceRetrieverStub:
+    def retrieve(self, query: str, k: int) -> tuple[RetrievalResult, ...]:
+        doc = CorpusDocument(
+            1, "Paper 1", ("Sentence 0.", "Sentence 1.", "Sentence 2.", "Sentence 3."), False
+        )
+        return (RetrievalResult(1, 1.0, 1, doc),)
+
+
+def run_v41_citation_case(
+    evidence: list[dict[str, object]], *, version: str = "v4.1"
+) -> ArgusResult:
+    generator = GeneratorStub(
+        [
+            {"label": "SUPPORT", "rationale": "Direct.", "sentence_indices": [0]},
+            {"verdict": "SUPPORT", "rationale": "Grounded.", "evidence": evidence},
+        ]
+    )
+    return ArgusAgent(
+        MultiSentenceRetrieverStub(),
+        generator,
+        ArgusConfig(challenge_enabled=False, judge_version=version),
+    ).verify("A scientific claim")
+
+
+def test_v41_merges_distinct_sentences_from_same_document() -> None:
+    evidence = [
+        {"doc_id": 1, "sentence_indices": [0]},
+        {"doc_id": "1", "sentence_indices": [1, 2]},
+    ]
+    result = run_v41_citation_case(evidence)
+    assert result.status == "success"
+    assert result.response is not None
+    assert len(result.response.evidence) == 1
+    assert result.response.evidence[0].sentence_indices == (0, 1, 2)
+    judge = next(event for event in result.trace if event.get("purpose") == "judge")
+    assert judge["citation_normalization"]["applied"] is True
+
+
+def test_original_v4_still_rejects_duplicate_documents() -> None:
+    evidence = [
+        {"doc_id": 1, "sentence_indices": [0]},
+        {"doc_id": 1, "sentence_indices": [1]},
+    ]
+    result = run_v41_citation_case(evidence, version="v4")
+    assert result.status == "invalid_response"
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        [
+            {"doc_id": 1, "sentence_indices": [0]},
+            {"doc_id": "1", "sentence_indices": [0]},
+        ],
+        [
+            {"doc_id": 1, "sentence_indices": [0, 1]},
+            {"doc_id": 1, "sentence_indices": [2, 3]},
+        ],
+        [{"doc_id": 1, "sentence_indices": [9]}],
+        [{"doc_id": 99, "sentence_indices": [0]}],
+    ],
+)
+def test_v41_rejects_invalid_citations(evidence: list[dict[str, object]]) -> None:
+    result = run_v41_citation_case(evidence)
+    assert result.status == "invalid_response"
+
+
+def test_v41_reuses_exact_v4_prompt_and_schema() -> None:
+    assert prompt_fingerprints("v4.1") == prompt_fingerprints("v4")
+    assert judge_json_schema(version="v4.1") == judge_json_schema(version="v4")
