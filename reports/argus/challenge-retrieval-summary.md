@@ -12,6 +12,9 @@ their A40 reruns `outputs/rag/20261022T064540Z/` and `outputs/iterative_rag/2026
 order. None was interrupted or resumed. **The combined run with the v4 Judge has not been done, so this
 report says nothing about v4.**
 
+**Follow-up:** all six arms were rerun with the v4.1 Judge; see `challenge-retrieval-v41-summary.md`,
+which supersedes the next steps below.
+
 | Arm | Variant | Challenge search | Challenge query | Skips Support's documents | Run | Job | Started (UTC+8) | Job wall-clock |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | A | `no_challenge` | none | none | n/a | `20261026T151208Z` | 339339 | 26 Oct 23:10 | 1 h 13 min 46 s |
