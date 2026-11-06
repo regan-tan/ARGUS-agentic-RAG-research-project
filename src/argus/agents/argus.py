@@ -63,6 +63,27 @@ document ID and zero-based sentence indices."""
 Return JSON matching the requested schema."""
 )
 
+VERIFIER_V2_VERSION = "argus-verifier-v2"
+VERIFIER_V2_CHECKS = """Before choosing a label, check the following. Within the one-sentence
+rationale, state whether the subject matches and the direction of effect in the claim and paper.
+1. Subject: does the paper study the same entity, intervention, population, and outcome as the
+claim? If it studies a different one, use INSUFFICIENT, not CONTRADICT.
+2. Direction: compare the direction of the effect in the claim and in the paper (increase or
+decrease, more or less, higher or lower, protective or harmful). The same direction is SUPPORT;
+the opposite direction is CONTRADICT. Shared terms or topic alone are not support.
+3. Negation: a claim of no effect, no association, or ineffectiveness is contradicted by a
+reported effect, and supported by a reported absence of effect.
+4. Findings: use the paper's own results and conclusions, not background statements or prior
+work that the paper reports and then overturns.
+Write the rationale first, then choose the label that it justifies."""
+VERIFIER_V2_SYSTEM_PROMPT = VERIFIER_SYSTEM_PROMPT.replace(
+    f"({PROMPT_VERSION})", f"({VERIFIER_V2_VERSION})"
+).replace(
+    "Return JSON matching the requested schema.",
+    f"{VERIFIER_V2_CHECKS}\nReturn JSON matching the requested schema.",
+)
+VerifierVersion = Literal["v1", "v2"]
+
 CHALLENGE_QUERY_SYSTEM_PROMPT = f"""You write one search query for ARGUS's Challenge agent \
 ({CHALLENGE_QUERY_VERSION}). The query searches a fixed corpus of scientific paper abstracts.
 Write a single concise query of at most {MAX_QUERY_WORDS} words that would find studies reporting \
@@ -112,6 +133,7 @@ class ArgusConfig:
     challenge_retrieval: Literal["dense", "bm25", "hybrid"] = "dense"
     challenge_query: Literal["suffix", "claim", "counter_hypothesis"] = "suffix"
     challenge_exclude_support: bool = False
+    verifier_version: VerifierVersion = "v1"
 
     def __post_init__(self) -> None:
         if self.retrieval_k <= 0 or self.max_evidence_documents <= 0 or self.max_llm_calls <= 0:
@@ -122,6 +144,8 @@ class ArgusConfig:
             raise ValueError("context_window_tokens must be positive when supplied")
         if self.judge_version not in {"v3", "v4", "v4.1"}:
             raise ValueError("judge_version must be v3, v4, or v4.1")
+        if self.verifier_version not in {"v1", "v2"}:
+            raise ValueError("verifier_version must be v1 or v2")
         if self.challenge_retrieval not in {"dense", "bm25", "hybrid"}:
             raise ValueError("challenge_retrieval must be dense, bm25, or hybrid")
         if self.challenge_query not in {"suffix", "claim", "counter_hypothesis"}:
@@ -309,16 +333,32 @@ class ArgusResult:
         )
 
 
-def verifier_json_schema() -> dict[str, object]:
+def verifier_json_schema(version: VerifierVersion = "v1") -> dict[str, object]:
+    """Return the Verifier schema; v2 puts the rationale before the label so it is written first."""
+
+    fields: dict[str, object] = {
+        "label": {"type": "string", "enum": ["SUPPORT", "CONTRADICT", "INSUFFICIENT"]},
+        "rationale": {"type": "string", "maxLength": MAX_RATIONALE_CHARS},
+        "sentence_indices": {"type": "array", "items": {"type": "integer"}},
+    }
+    order = (
+        ["rationale", "label", "sentence_indices"]
+        if version == "v2"
+        else ["label", "rationale", "sentence_indices"]
+    )
     return {
         "type": "object",
-        "required": ["label", "rationale", "sentence_indices"],
-        "properties": {
-            "label": {"type": "string", "enum": ["SUPPORT", "CONTRADICT", "INSUFFICIENT"]},
-            "rationale": {"type": "string", "maxLength": MAX_RATIONALE_CHARS},
-            "sentence_indices": {"type": "array", "items": {"type": "integer"}},
-        },
+        "required": order,
+        "properties": {name: fields[name] for name in order},
     }
+
+
+def verifier_prompt(version: VerifierVersion = "v1") -> tuple[str, str]:
+    """Return the Verifier system prompt and its recorded version label."""
+
+    if version == "v2":
+        return VERIFIER_V2_SYSTEM_PROMPT, VERIFIER_V2_VERSION
+    return VERIFIER_SYSTEM_PROMPT, PROMPT_VERSION
 
 
 def judge_json_schema(
@@ -362,8 +402,10 @@ def _sha256(value: str) -> str:
 def prompt_fingerprints(
     judge_version: Literal["v3", "v4", "v4.1"] = "v3",
     challenge_query: str = "suffix",
+    verifier_version: VerifierVersion = "v1",
 ) -> dict[str, dict[str, str]]:
     judge_prompt = JUDGE_V4_SYSTEM_PROMPT if judge_version != "v3" else JUDGE_SYSTEM_PROMPT
+    verifier_system, verifier_label = verifier_prompt(verifier_version)
     query_prompt = (
         {
             "challenge_query": {
@@ -377,8 +419,8 @@ def prompt_fingerprints(
     return {
         **query_prompt,
         "evidence_verifier": {
-            "version": PROMPT_VERSION,
-            "system_prompt_sha256": _sha256(VERIFIER_SYSTEM_PROMPT),
+            "version": verifier_label,
+            "system_prompt_sha256": _sha256(verifier_system),
         },
         "judge": {
             "version": JUDGE_V4_VERSION if judge_version != "v3" else PROMPT_VERSION,
@@ -986,6 +1028,8 @@ class ArgusAgent:
         trace = state["trace"]
         calls = state["llm_calls"]
         invalid_documents = 0
+        verifier_system, verifier_label = verifier_prompt(self.config.verifier_version)
+        verifier_schema = verifier_json_schema(self.config.verifier_version)
         for item in state["evidence"]:
             # No provenance is present in this prompt.
             user = (
@@ -995,9 +1039,10 @@ class ArgusAgent:
             response, event, failure = self._chat(
                 {**state, "llm_calls": calls},
                 "evidence_verifier",
-                VERIFIER_SYSTEM_PROMPT,
+                verifier_system,
                 user,
-                verifier_json_schema(),
+                verifier_schema,
+                prompt_version=verifier_label,
             )
             event["doc_id"] = item.result.doc_id
             if "call_index" in event:

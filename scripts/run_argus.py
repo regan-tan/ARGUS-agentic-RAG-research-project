@@ -63,6 +63,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--no-challenge", action="store_true")
     parser.add_argument("--judge-version", choices=("v3", "v4", "v4.1"), default="v3")
+    parser.add_argument("--verifier-version", choices=("v1", "v2"), default="v1")
     parser.add_argument("--challenge-retrieval", choices=tuple(CHALLENGE_METHODS), default="dense")
     parser.add_argument(
         "--challenge-query", choices=("suffix", "claim", "counter_hypothesis"), default="suffix"
@@ -130,6 +131,7 @@ def main() -> int:
         challenge_retrieval=args.challenge_retrieval,
         challenge_query=args.challenge_query,
         challenge_exclude_support=args.challenge_exclude_support,
+        verifier_version=args.verifier_version,
     )
     client = OllamaChatClient(
         model=args.model,
@@ -158,17 +160,22 @@ def main() -> int:
         "v4": "argus-v4-judge",
         "v4.1": "argus-v4.1-citation-normalization",
     }[args.judge_version]
+    implementation_version = (
+        base_version
+        if config.variant() in {"full", "no_challenge"}
+        else f"{base_version}-challenge-retrieval"
+    )
+    if args.verifier_version == "v2":
+        implementation_version = f"{implementation_version}-verifier-v2"
     metadata = {
         "experiment": "Experiment 3 ARGUS",
-        "implementation_version": (
-            base_version
-            if config.variant() in {"full", "no_challenge"}
-            else f"{base_version}-challenge-retrieval"
-        ),
+        "implementation_version": implementation_version,
         "variant": config.variant(),
         "seed": args.seed,
         "agent": config.to_dict(),
-        "prompts": prompt_fingerprints(args.judge_version, args.challenge_query),
+        "prompts": prompt_fingerprints(
+            args.judge_version, args.challenge_query, args.verifier_version
+        ),
         "retrieval": {
             "method": "dense BGE-small plus FAISS IndexFlatIP",
             "k": args.k,

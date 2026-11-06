@@ -402,3 +402,27 @@ A40/Ollama environment as v3. Do not silently retry failed claims. Report failur
 accuracy/F1, invalid outputs, citation precision and recall, calls, tokens, latency, and
 paired claim-level differences against the preserved v3 runs. The Judge fix does not
 guarantee improved factual accuracy or semantic citation faithfulness.
+
+## ARGUS Verifier v2 (opt-in)
+
+`--verifier-version v2` selects a separately recorded **argus-verifier-v2** Evidence Verifier
+prompt. The default `--verifier-version v1` keeps the original argus-v3 Verifier unchanged.
+
+Only the Verifier changes. Its prompt keeps every v1 rule and adds four checks before labelling:
+subject match (a different entity is INSUFFICIENT, not CONTRADICT), effect direction, negated
+claims ("no effect", "ineffective"), and the paper's own findings rather than background it
+overturns. Its schema asks for the rationale before the label; the fields and validation are the
+same. These checks come from the hand audit in `reports/argus/challenge-error-audit.md`.
+Runs record `agent.verifier_version`, the Verifier prompt SHA-256 under `prompts`, and an
+`implementation_version` ending in `-verifier-v2`. It combines with any Judge version and
+Challenge option:
+
+```bash
+uv run --locked python scripts/run_argus.py --smoke-test --judge-version v4.1 --verifier-version v2
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --verifier-version v2
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --verifier-version v2 \
+  --no-challenge
+```
+
+Develop and compare it on the 162 internal-validation claims only. No claim that v2 improves
+ARGUS is made until runs are complete.
