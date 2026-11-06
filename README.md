@@ -411,8 +411,8 @@ prompt. The default `--verifier-version v1` keeps the original argus-v3 Verifier
 Only the Verifier changes. Its prompt keeps every v1 rule and adds four checks before labelling:
 subject match (a different entity is INSUFFICIENT, not CONTRADICT), effect direction, negated
 claims ("no effect", "ineffective"), and the paper's own findings rather than background it
-overturns. Its schema asks for the rationale before the label; the fields and validation are the
-same. These checks come from the hand audit in `reports/argus/challenge-error-audit.md`.
+overturns. The response schema and validation are unchanged. These checks come from the hand
+audit in `reports/argus/challenge-error-audit.md`.
 Runs record `agent.verifier_version`, the Verifier prompt SHA-256 under `prompts`, and an
 `implementation_version` ending in `-verifier-v2`. It combines with any Judge version and
 Challenge option:

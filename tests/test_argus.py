@@ -1054,7 +1054,6 @@ def test_v4_changes_only_judge_prompt_fingerprint() -> None:
 def test_verifier_v1_contract_is_unchanged_by_default() -> None:
     assert ArgusConfig().verifier_version == "v1"
     schema = verifier_json_schema()
-    assert schema == verifier_json_schema("v1")
     assert schema["required"] == ["label", "rationale", "sentence_indices"]
     assert list(schema["properties"]) == ["label", "rationale", "sentence_indices"]
     v1 = prompt_fingerprints("v4.1")["evidence_verifier"]
@@ -1073,14 +1072,8 @@ def test_verifier_v2_keeps_v1_rules_and_adds_direction_checks() -> None:
     assert VERIFIER_V2_SYSTEM_PROMPT.endswith("Return JSON matching the requested schema.")
     for term in ("Subject", "Direction", "Negation", "Findings"):
         assert term in VERIFIER_V2_CHECKS
-
-
-def test_verifier_v2_schema_orders_rationale_first_with_the_same_fields() -> None:
-    v1, v2 = verifier_json_schema("v1"), verifier_json_schema("v2")
-    assert v2["required"] == ["rationale", "label", "sentence_indices"]
-    assert list(v2["properties"]) == ["rationale", "label", "sentence_indices"]
-    assert v2["properties"] == v1["properties"]
-    assert set(v2["required"]) == set(v1["required"])
+    # Ollama emits the fields in its own order, so v2 does not ask for the rationale first.
+    assert "rationale first" not in VERIFIER_V2_SYSTEM_PROMPT
 
 
 def test_verifier_v2_changes_only_the_verifier_fingerprint() -> None:
@@ -1123,7 +1116,7 @@ def test_verifier_v2_agent_uses_v2_prompt_and_schema_and_keeps_judge() -> None:
     assert result.status == "success"
     assert result.prediction == "CONTRADICT"
     assert generator.systems[0] == VERIFIER_V2_SYSTEM_PROMPT
-    assert generator.schemas[0] == verifier_json_schema("v2")
+    assert generator.schemas[0] == verifier_json_schema()
     assert generator.systems[-1] == JUDGE_V4_SYSTEM_PROMPT
     verifier = next(e for e in result.trace if e.get("purpose") == "evidence_verifier")
     assert verifier["prompt_version"] == VERIFIER_V2_VERSION

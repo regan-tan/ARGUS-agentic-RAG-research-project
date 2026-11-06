@@ -74,8 +74,7 @@ the opposite direction is CONTRADICT. Shared terms or topic alone are not suppor
 3. Negation: a claim of no effect, no association, or ineffectiveness is contradicted by a
 reported effect, and supported by a reported absence of effect.
 4. Findings: use the paper's own results and conclusions, not background statements or prior
-work that the paper reports and then overturns.
-Write the rationale first, then choose the label that it justifies."""
+work that the paper reports and then overturns."""
 VERIFIER_V2_SYSTEM_PROMPT = VERIFIER_SYSTEM_PROMPT.replace(
     f"({PROMPT_VERSION})", f"({VERIFIER_V2_VERSION})"
 ).replace(
@@ -333,23 +332,15 @@ class ArgusResult:
         )
 
 
-def verifier_json_schema(version: VerifierVersion = "v1") -> dict[str, object]:
-    """Return the Verifier schema; v2 puts the rationale before the label so it is written first."""
-
-    fields: dict[str, object] = {
-        "label": {"type": "string", "enum": ["SUPPORT", "CONTRADICT", "INSUFFICIENT"]},
-        "rationale": {"type": "string", "maxLength": MAX_RATIONALE_CHARS},
-        "sentence_indices": {"type": "array", "items": {"type": "integer"}},
-    }
-    order = (
-        ["rationale", "label", "sentence_indices"]
-        if version == "v2"
-        else ["label", "rationale", "sentence_indices"]
-    )
+def verifier_json_schema() -> dict[str, object]:
     return {
         "type": "object",
-        "required": order,
-        "properties": {name: fields[name] for name in order},
+        "required": ["label", "rationale", "sentence_indices"],
+        "properties": {
+            "label": {"type": "string", "enum": ["SUPPORT", "CONTRADICT", "INSUFFICIENT"]},
+            "rationale": {"type": "string", "maxLength": MAX_RATIONALE_CHARS},
+            "sentence_indices": {"type": "array", "items": {"type": "integer"}},
+        },
     }
 
 
@@ -1029,7 +1020,7 @@ class ArgusAgent:
         calls = state["llm_calls"]
         invalid_documents = 0
         verifier_system, verifier_label = verifier_prompt(self.config.verifier_version)
-        verifier_schema = verifier_json_schema(self.config.verifier_version)
+        verifier_schema = verifier_json_schema()
         for item in state["evidence"]:
             # No provenance is present in this prompt.
             user = (
