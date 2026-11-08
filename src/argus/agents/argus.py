@@ -133,6 +133,8 @@ class ArgusConfig:
     challenge_query: Literal["suffix", "claim", "counter_hypothesis"] = "suffix"
     challenge_exclude_support: bool = False
     verifier_version: VerifierVersion = "v1"
+    # Ablation only: False sends merged, unverified abstracts straight to the Judge.
+    verifier_enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.retrieval_k <= 0 or self.max_evidence_documents <= 0 or self.max_llm_calls <= 0:
@@ -155,12 +157,22 @@ class ArgusConfig:
             or self.challenge_exclude_support
         ):
             raise ValueError("Challenge retrieval options require the Challenge agent")
+        if not self.verifier_enabled and self.verifier_version != "v1":
+            raise ValueError("verifier_version cannot be set when the Verifier is disabled")
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        values = asdict(self)
+        if self.verifier_enabled:
+            # Keep metadata of Verifier-enabled runs identical to earlier recorded runs.
+            del values["verifier_enabled"]
+        return values
 
     def variant(self) -> str:
         """Name the ablation arm; the original configurations keep their recorded names."""
+        name = self._challenge_variant()
+        return name if self.verifier_enabled else f"{name}_no_verifier"
+
+    def _challenge_variant(self) -> str:
         if not self.challenge_enabled:
             return "no_challenge"
         if (
@@ -394,9 +406,20 @@ def prompt_fingerprints(
     judge_version: Literal["v3", "v4", "v4.1"] = "v3",
     challenge_query: str = "suffix",
     verifier_version: VerifierVersion = "v1",
+    verifier_enabled: bool = True,
 ) -> dict[str, dict[str, str]]:
     judge_prompt = JUDGE_V4_SYSTEM_PROMPT if judge_version != "v3" else JUDGE_SYSTEM_PROMPT
     verifier_system, verifier_label = verifier_prompt(verifier_version)
+    verifier = (
+        {
+            "evidence_verifier": {
+                "version": verifier_label,
+                "system_prompt_sha256": _sha256(verifier_system),
+            }
+        }
+        if verifier_enabled
+        else {}
+    )
     query_prompt = (
         {
             "challenge_query": {
@@ -409,10 +432,7 @@ def prompt_fingerprints(
     )
     return {
         **query_prompt,
-        "evidence_verifier": {
-            "version": verifier_label,
-            "system_prompt_sha256": _sha256(verifier_system),
-        },
+        **verifier,
         "judge": {
             "version": JUDGE_V4_VERSION if judge_version != "v3" else PROMPT_VERSION,
             "system_prompt_sha256": _sha256(judge_prompt),
@@ -762,7 +782,9 @@ class ArgusAgent:
         if self.config.challenge_enabled:
             graph.add_node("challenge", self._challenge)
         graph.add_node("merge", self._merge)
-        graph.add_node("verify", self._verify)
+        graph.add_node(
+            "verify", self._verify if self.config.verifier_enabled else self._skip_verification
+        )
         graph.add_node("judge", self._judge)
         graph.add_edge(START, "decompose")
         graph.add_edge("decompose", "support")
@@ -998,23 +1020,42 @@ class ArgusAgent:
             )
         return response, event, None
 
+    def _no_abstracts_failure(self, state: _State) -> dict[str, Any]:
+        event = {
+            "type": "verification_summary",
+            "outcome": "no_abstracts_retrieved",
+            "attempted_documents": 0,
+            "valid_documents": 0,
+            "invalid_documents": 0,
+        }
+        return self._failure(
+            state,
+            "retrieval_failure",
+            "no abstracts were retrieved for evidence verification",
+            event,
+        )
+
+    def _skip_verification(self, state: _State) -> dict[str, Any]:
+        """No-Verifier ablation: make no Verifier calls; the Judge reads merged abstracts."""
+        if state["status"] is not None:
+            return {}
+        if not state["evidence"]:
+            return self._no_abstracts_failure(state)
+        summary = {
+            "type": "verification_summary",
+            "outcome": "verifier_disabled",
+            "attempted_documents": 0,
+            "valid_documents": 0,
+            "invalid_documents": 0,
+            "unverified_documents": len(state["evidence"]),
+        }
+        return {"trace": state["trace"] + (summary,)}
+
     def _verify(self, state: _State) -> dict[str, Any]:
         if state["status"] is not None:
             return {}
         if not state["evidence"]:
-            event = {
-                "type": "verification_summary",
-                "outcome": "no_abstracts_retrieved",
-                "attempted_documents": 0,
-                "valid_documents": 0,
-                "invalid_documents": 0,
-            }
-            return self._failure(
-                state,
-                "retrieval_failure",
-                "no abstracts were retrieved for evidence verification",
-                event,
-            )
+            return self._no_abstracts_failure(state)
         verified: list[VerifiedEvidence] = []
         trace = state["trace"]
         calls = state["llm_calls"]
@@ -1094,13 +1135,17 @@ class ArgusAgent:
     def _judge(self, state: _State) -> dict[str, Any]:
         if state["status"] is not None:
             return {}
-        allowed = tuple(item.evidence.result for item in state["verified"])
-        blocks = []
-        for item in state["verified"]:
-            blocks.append(
+        if self.config.verifier_enabled:
+            allowed = tuple(item.evidence.result for item in state["verified"])
+            blocks = [
                 f"Verification: {item.label}; rationale: {item.rationale}\n"
                 f"{_evidence_text(item.evidence)}"
-            )
+                for item in state["verified"]
+            ]
+        else:
+            # Same Judge prompt, schema and wrapper; only the Verifier line is absent.
+            allowed = tuple(item.result for item in state["evidence"])
+            blocks = [_evidence_text(item) for item in state["evidence"]]
         rendered_blocks = "\n\n---\n\n".join(blocks)
         user = (
             f"<claim>\n{state['claim']}\n</claim>\n\n<verified_evidence>\n"

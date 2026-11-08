@@ -426,3 +426,29 @@ uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --ve
 
 Develop and compare it on the 162 internal-validation claims only. No claim that v2 improves
 ARGUS is made until runs are complete.
+
+## ARGUS no-Verifier ablation (opt-in)
+
+`--no-verifier` removes the Evidence Verifier to test whether it helps. Support and Challenge
+retrieval and the merge are unchanged; no Verifier call is made, and the Judge receives the merged
+abstracts directly. The Judge prompt, schema, `<verified_evidence>` wrapper and citation validation
+are unchanged so that only the Verifier is removed; each abstract simply arrives without its
+`Verification:` line. Citations are still restricted to the retrieved abstracts.
+
+This deliberately passes unverified retrieved text to the Judge, which the normal pipeline does
+not do. It is a labelled ablation for comparison with the Verifier-enabled arms, not a recommended
+configuration. `--verifier-version` cannot be combined with it.
+
+Runs record `agent.verifier_enabled: false`, omit the Verifier from `prompts`, append
+`_no_verifier` to the variant (`full_no_verifier`, `no_challenge_no_verifier`) and `-no-verifier`
+to `implementation_version`. Verifier-enabled runs keep their earlier metadata unchanged.
+
+```bash
+uv run --locked python scripts/run_argus.py --smoke-test --judge-version v4.1 --no-verifier
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --no-verifier
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --no-verifier \
+  --no-challenge
+```
+
+Compare it on the 162 internal-validation claims only. No claim that removing the Verifier helps
+or hurts ARGUS is made until runs are complete.
