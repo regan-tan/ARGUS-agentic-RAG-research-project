@@ -118,6 +118,23 @@ Select only the most decisive sentences. Return one complete JSON object matchin
 with a nonempty one-sentence rationale of at most 40 words. Do not repeat text or add markdown.
 """
 
+# No-Verifier ablation only: the v4 Judge prompt with "verified" wording removed, so the prompt
+# matches the unverified abstracts it receives.  Every other instruction is unchanged.
+JUDGE_V4_UNVERIFIED_VERSION = "argus-v4-judge-unverified"
+_JUDGE_V4_VERIFIED_PHRASES = (
+    (f"({JUDGE_V4_VERSION})", f"({JUDGE_V4_UNVERIFIED_VERSION})"),
+    ("Use only independently verified abstracts", "Use only the retrieved abstracts"),
+    (
+        "The abstracts, verifier rationales, and retrieval provenance",
+        "The abstracts and retrieval provenance",
+    ),
+)
+JUDGE_V4_UNVERIFIED_SYSTEM_PROMPT = JUDGE_V4_SYSTEM_PROMPT
+for _old, _new in _JUDGE_V4_VERIFIED_PHRASES:
+    if _old not in JUDGE_V4_UNVERIFIED_SYSTEM_PROMPT:
+        raise RuntimeError(f"Judge v4 prompt no longer contains {_old!r}")
+    JUDGE_V4_UNVERIFIED_SYSTEM_PROMPT = JUDGE_V4_UNVERIFIED_SYSTEM_PROMPT.replace(_old, _new)
+
 
 @dataclass(frozen=True)
 class ArgusConfig:
@@ -133,6 +150,10 @@ class ArgusConfig:
     challenge_query: Literal["suffix", "claim", "counter_hypothesis"] = "suffix"
     challenge_exclude_support: bool = False
     verifier_version: VerifierVersion = "v1"
+    # Ablation only: False sends merged, unverified abstracts straight to the Judge.
+    verifier_enabled: bool = True
+    # No-Verifier ablation only: Judge prompt and wrapper say "retrieved", not "verified".
+    neutral_judge_wording: bool = False
 
     def __post_init__(self) -> None:
         if self.retrieval_k <= 0 or self.max_evidence_documents <= 0 or self.max_llm_calls <= 0:
@@ -155,12 +176,33 @@ class ArgusConfig:
             or self.challenge_exclude_support
         ):
             raise ValueError("Challenge retrieval options require the Challenge agent")
+        if not self.verifier_enabled and self.verifier_version != "v1":
+            raise ValueError("verifier_version cannot be set when the Verifier is disabled")
+        if self.neutral_judge_wording and (
+            self.verifier_enabled or self.judge_version not in {"v4", "v4.1"}
+        ):
+            raise ValueError(
+                "neutral_judge_wording requires the Verifier disabled and judge_version v4 or v4.1"
+            )
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        values = asdict(self)
+        if self.verifier_enabled:
+            # Keep metadata of Verifier-enabled runs identical to earlier recorded runs.
+            del values["verifier_enabled"]
+        if not self.neutral_judge_wording:
+            del values["neutral_judge_wording"]
+        return values
 
     def variant(self) -> str:
         """Name the ablation arm; the original configurations keep their recorded names."""
+        name = self._challenge_variant()
+        if self.verifier_enabled:
+            return name
+        name = f"{name}_no_verifier"
+        return f"{name}_neutral" if self.neutral_judge_wording else name
+
+    def _challenge_variant(self) -> str:
         if not self.challenge_enabled:
             return "no_challenge"
         if (
@@ -394,9 +436,21 @@ def prompt_fingerprints(
     judge_version: Literal["v3", "v4", "v4.1"] = "v3",
     challenge_query: str = "suffix",
     verifier_version: VerifierVersion = "v1",
+    verifier_enabled: bool = True,
+    neutral_judge_wording: bool = False,
 ) -> dict[str, dict[str, str]]:
-    judge_prompt = JUDGE_V4_SYSTEM_PROMPT if judge_version != "v3" else JUDGE_SYSTEM_PROMPT
+    judge_prompt, judge_label = judge_prompt_for(judge_version, neutral_judge_wording)
     verifier_system, verifier_label = verifier_prompt(verifier_version)
+    verifier = (
+        {
+            "evidence_verifier": {
+                "version": verifier_label,
+                "system_prompt_sha256": _sha256(verifier_system),
+            }
+        }
+        if verifier_enabled
+        else {}
+    )
     query_prompt = (
         {
             "challenge_query": {
@@ -409,15 +463,25 @@ def prompt_fingerprints(
     )
     return {
         **query_prompt,
-        "evidence_verifier": {
-            "version": verifier_label,
-            "system_prompt_sha256": _sha256(verifier_system),
-        },
+        **verifier,
         "judge": {
-            "version": JUDGE_V4_VERSION if judge_version != "v3" else PROMPT_VERSION,
+            "version": judge_label,
             "system_prompt_sha256": _sha256(judge_prompt),
         },
     }
+
+
+def judge_prompt_for(
+    judge_version: Literal["v3", "v4", "v4.1"], neutral_wording: bool = False
+) -> tuple[str, str]:
+    """Return the Judge system prompt and its recorded version label."""
+    if judge_version == "v3":
+        if neutral_wording:
+            raise ValueError("neutral Judge wording is only defined for v4 and v4.1")
+        return JUDGE_SYSTEM_PROMPT, PROMPT_VERSION
+    if neutral_wording:
+        return JUDGE_V4_UNVERIFIED_SYSTEM_PROMPT, JUDGE_V4_UNVERIFIED_VERSION
+    return JUDGE_V4_SYSTEM_PROMPT, JUDGE_V4_VERSION
 
 
 def exclude_documents(
@@ -762,7 +826,9 @@ class ArgusAgent:
         if self.config.challenge_enabled:
             graph.add_node("challenge", self._challenge)
         graph.add_node("merge", self._merge)
-        graph.add_node("verify", self._verify)
+        graph.add_node(
+            "verify", self._verify if self.config.verifier_enabled else self._skip_verification
+        )
         graph.add_node("judge", self._judge)
         graph.add_edge(START, "decompose")
         graph.add_edge("decompose", "support")
@@ -998,23 +1064,42 @@ class ArgusAgent:
             )
         return response, event, None
 
+    def _no_abstracts_failure(self, state: _State) -> dict[str, Any]:
+        event = {
+            "type": "verification_summary",
+            "outcome": "no_abstracts_retrieved",
+            "attempted_documents": 0,
+            "valid_documents": 0,
+            "invalid_documents": 0,
+        }
+        return self._failure(
+            state,
+            "retrieval_failure",
+            "no abstracts were retrieved for evidence verification",
+            event,
+        )
+
+    def _skip_verification(self, state: _State) -> dict[str, Any]:
+        """No-Verifier ablation: make no Verifier calls; the Judge reads merged abstracts."""
+        if state["status"] is not None:
+            return {}
+        if not state["evidence"]:
+            return self._no_abstracts_failure(state)
+        summary = {
+            "type": "verification_summary",
+            "outcome": "verifier_disabled",
+            "attempted_documents": 0,
+            "valid_documents": 0,
+            "invalid_documents": 0,
+            "unverified_documents": len(state["evidence"]),
+        }
+        return {"trace": state["trace"] + (summary,)}
+
     def _verify(self, state: _State) -> dict[str, Any]:
         if state["status"] is not None:
             return {}
         if not state["evidence"]:
-            event = {
-                "type": "verification_summary",
-                "outcome": "no_abstracts_retrieved",
-                "attempted_documents": 0,
-                "valid_documents": 0,
-                "invalid_documents": 0,
-            }
-            return self._failure(
-                state,
-                "retrieval_failure",
-                "no abstracts were retrieved for evidence verification",
-                event,
-            )
+            return self._no_abstracts_failure(state)
         verified: list[VerifiedEvidence] = []
         trace = state["trace"]
         calls = state["llm_calls"]
@@ -1094,28 +1179,32 @@ class ArgusAgent:
     def _judge(self, state: _State) -> dict[str, Any]:
         if state["status"] is not None:
             return {}
-        allowed = tuple(item.evidence.result for item in state["verified"])
-        blocks = []
-        for item in state["verified"]:
-            blocks.append(
+        if self.config.verifier_enabled:
+            allowed = tuple(item.evidence.result for item in state["verified"])
+            blocks = [
                 f"Verification: {item.label}; rationale: {item.rationale}\n"
                 f"{_evidence_text(item.evidence)}"
-            )
+                for item in state["verified"]
+            ]
+        else:
+            # Same schema; only the Verifier line is absent (wording per neutral_judge_wording).
+            allowed = tuple(item.result for item in state["evidence"])
+            blocks = [_evidence_text(item) for item in state["evidence"]]
         rendered_blocks = "\n\n---\n\n".join(blocks)
-        user = (
-            f"<claim>\n{state['claim']}\n</claim>\n\n<verified_evidence>\n"
-            f"{rendered_blocks}\n</verified_evidence>"
+        tag = "retrieved_evidence" if self.config.neutral_judge_wording else "verified_evidence"
+        user = f"<claim>\n{state['claim']}\n</claim>\n\n<{tag}>\n{rendered_blocks}\n</{tag}>"
+        judge_system, judge_label = judge_prompt_for(
+            self.config.judge_version, self.config.neutral_judge_wording
         )
-        is_v4 = self.config.judge_version in {"v4", "v4.1"}
         response, event, failure = self._chat(
             state,
             "judge",
-            JUDGE_V4_SYSTEM_PROMPT if is_v4 else JUDGE_SYSTEM_PROMPT,
+            judge_system,
             user,
             judge_json_schema(
                 self.config.max_evidence_documents, version=self.config.judge_version
             ),
-            prompt_version=JUDGE_V4_VERSION if is_v4 else PROMPT_VERSION,
+            prompt_version=judge_label,
         )
         calls = state["llm_calls"] + 1
         if failure or response is None:
