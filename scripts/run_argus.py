@@ -20,9 +20,11 @@ from argus.data.models import CorpusDocument
 from argus.data.scifact import load_scifact_dataset
 from argus.data.validation import validate_scifact_dataset
 from argus.evaluation.verification import (
+    OFFICIAL_DEV_SOURCE,
     assert_expected_internal_validation,
     derive_gold_verdict,
     select_internal_validation_claims,
+    select_official_dev_claims,
     select_smoke_claims,
 )
 from argus.llm import DEFAULT_OLLAMA_ENDPOINT, DEFAULT_QWEN_MODEL, OllamaChatClient, OllamaError
@@ -79,6 +81,13 @@ def arguments() -> argparse.Namespace:
         "--challenge-query", choices=("suffix", "claim", "counter_hypothesis"), default="suffix"
     )
     parser.add_argument("--challenge-exclude-support", action="store_true")
+    parser.add_argument(
+        "--split",
+        choices=("internal", "dev"),
+        default="internal",
+        help="Claims for --evaluate: the seed-42 internal validation subset (default) or the "
+        "official labeled SciFact dev split, reserved for the frozen final evaluation.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--max-evidence-documents", type=int, default=10)
@@ -123,6 +132,9 @@ def main() -> int:
     args = arguments()
     if args.limit is not None and args.limit <= 0:
         print("--limit must be positive", file=sys.stderr)
+        return 2
+    if args.split == "dev" and not args.evaluate:
+        print("--split dev is available only with --evaluate", file=sys.stderr)
         return 2
     if args.no_challenge and (
         args.challenge_retrieval != "dense"
@@ -245,25 +257,37 @@ def main() -> int:
         write_json(run_dir / "metadata.json", metadata)
         print(f"status={result.status} prediction={result.prediction} artifacts={run_dir}")
         return 0 if result.status == "success" else 1
-    validation_claims = select_internal_validation_claims(dataset.train_claims, seed=args.seed)
-    try:
-        assert_expected_internal_validation(validation_claims)
-    except ValueError as error:
-        print(str(error), file=sys.stderr)
-        return 1
-    if args.smoke_test:
-        if args.limit is not None:
-            print("--smoke-test selects exactly five claims; do not pass --limit", file=sys.stderr)
-            return 2
-        validation_ids = {str(claim.claim_id) for claim in validation_claims}
-        development_claims = tuple(
-            claim for claim in dataset.train_claims if str(claim.claim_id) not in validation_ids
-        )
-        selected = select_smoke_claims(development_claims, limit=5)
-        evaluation_mode = "internal_development_smoke_test"
+    if args.split == "dev":
+        try:
+            selected, evaluation_mode = select_official_dev_claims(
+                dataset.dev_claims, limit=args.limit
+            )
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
     else:
-        selected = validation_claims[: args.limit] if args.limit else validation_claims
-        evaluation_mode = "partial_internal_validation" if args.limit else "internal_validation"
+        validation_claims = select_internal_validation_claims(dataset.train_claims, seed=args.seed)
+        try:
+            assert_expected_internal_validation(validation_claims)
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        if args.smoke_test:
+            if args.limit is not None:
+                print(
+                    "--smoke-test selects exactly five claims; do not pass --limit",
+                    file=sys.stderr,
+                )
+                return 2
+            validation_ids = {str(claim.claim_id) for claim in validation_claims}
+            development_claims = tuple(
+                claim for claim in dataset.train_claims if str(claim.claim_id) not in validation_ids
+            )
+            selected = select_smoke_claims(development_claims, limit=5)
+            evaluation_mode = "internal_development_smoke_test"
+        else:
+            selected = validation_claims[: args.limit] if args.limit else validation_claims
+            evaluation_mode = "partial_internal_validation" if args.limit else "internal_validation"
     claim_ids = [claim.claim_id for claim in selected]
     expected_configuration = {
         "schema_version": 2,
@@ -311,7 +335,9 @@ def main() -> int:
         metadata["selected_claim_ids"] = claim_ids
         metadata["evaluation"] = {
             "mode": evaluation_mode,
-            "source": "train-derived internal development"
+            "source": OFFICIAL_DEV_SOURCE
+            if args.split == "dev"
+            else "train-derived internal development"
             if args.smoke_test
             else "seed-42 validation",
         }

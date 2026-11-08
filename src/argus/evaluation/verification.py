@@ -71,6 +71,36 @@ def assert_expected_internal_validation(claims: Sequence[Claim]) -> None:
         )
 
 
+OFFICIAL_DEV_SOURCE = "official SciFact claims_dev.jsonl (labeled, held out for final evaluation)"
+
+
+def select_official_dev_claims(
+    claims: Sequence[Claim], *, limit: int | None = None
+) -> tuple[tuple[Claim, ...], str]:
+    """Return the official labeled dev claims in stable ID order and the evaluation mode.
+
+    The full split must match the documented 300/188/112 counts; ``limit`` keeps a prefix of
+    that fixed order for partial runs.  Smoke tests never draw from this held-out split.
+    """
+
+    if any(claim.evidence is None for claim in claims):
+        raise ValueError("Official dev evaluation requires labeled SciFact claims")
+    evidence_bearing = sum(1 for claim in claims if claim.evidence)
+    no_evidence = sum(1 for claim in claims if claim.evidence == {})
+    if (len(claims), evidence_bearing, no_evidence) != (300, 188, 112):
+        raise ValueError(
+            "Expected the official SciFact dev split to contain 300 claims "
+            f"(188 evidence-bearing, 112 no-evidence), got "
+            f"{len(claims)}, {evidence_bearing}, {no_evidence}"
+        )
+    if limit is not None and limit <= 0:
+        raise ValueError("limit must be positive")
+    ordered = tuple(sorted(claims, key=lambda claim: str(claim.claim_id)))
+    if limit is None:
+        return ordered, "official_dev"
+    return ordered[:limit], "partial_official_dev"
+
+
 def select_smoke_claims(claims: Sequence[Claim], *, limit: int = 5) -> tuple[Claim, ...]:
     """Select a deterministic, label-stratified smoke sample without using predictions."""
 

@@ -24,9 +24,11 @@ from argus.data.models import Claim
 from argus.data.scifact import SciFactDataError, load_scifact_dataset
 from argus.data.validation import DatasetValidationError, validate_scifact_dataset
 from argus.evaluation.verification import (
+    OFFICIAL_DEV_SOURCE,
     assert_expected_internal_validation,
     derive_gold_verdict,
     select_internal_validation_claims,
+    select_official_dev_claims,
     select_smoke_claims,
 )
 from argus.llm import DEFAULT_OLLAMA_ENDPOINT, DEFAULT_QWEN_MODEL, OllamaChatClient, OllamaError
@@ -50,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--claim", help="Run one unlabelled scientific claim.")
     mode.add_argument(
-        "--evaluate", action="store_true", help="Evaluate internal validation claims."
+        "--evaluate", action="store_true", help="Evaluate the claims selected by --split."
     )
     mode.add_argument(
         "--smoke-test",
@@ -64,6 +66,13 @@ def parse_args() -> argparse.Namespace:
         "--resume",
         type=Path,
         help="Resume an interrupted run directory after strict configuration validation.",
+    )
+    parser.add_argument(
+        "--split",
+        choices=("internal", "dev"),
+        default="internal",
+        help="Claims to evaluate: the seed-42 internal validation subset (default) or the "
+        "official labeled SciFact dev split, reserved for the frozen final evaluation.",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--k", type=int, default=5, help="Initial retrieval depth.")
@@ -81,7 +90,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-predict", type=int, default=512)
     parser.add_argument("--num-ctx", type=int, default=8_192)
     parser.add_argument("--top-k", type=int, default=40)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.split == "dev" and not args.evaluate:
+        parser.error("--split dev is available only with --evaluate")
+    return args
 
 
 def select_claims(
@@ -206,6 +218,7 @@ def _update_run_state(
     *,
     status: str,
     full_validation_count: int,
+    split_label: str = "internal_validation",
 ) -> dict[str, object]:
     state: dict[str, object] = {
         "status": status,
@@ -217,8 +230,8 @@ def _update_run_state(
         "remaining_claim_ids": [
             claim.claim_id for claim in claims if str(claim.claim_id) not in attempts
         ],
-        "full_internal_validation_claim_count": full_validation_count,
-        "is_full_internal_validation": len(claims) == full_validation_count,
+        f"full_{split_label}_claim_count": full_validation_count,
+        f"is_full_{split_label}": len(claims) == full_validation_count,
         "updated_utc": datetime.now(UTC).isoformat(),
     }
     metadata["run"] = state
@@ -371,17 +384,32 @@ def main() -> int:
         print(f"artifacts={run_dir}")
         return 0 if result.status == "success" else 1
 
-    validation_claims = select_internal_validation_claims(dataset.train_claims, seed=args.seed)
-    try:
-        assert_expected_internal_validation(validation_claims)
-    except ValueError as error:
-        print(f"Internal validation configuration failed: {error}", file=sys.stderr)
-        return 1
-    claims, mode = select_claims(validation_claims, smoke_test=args.smoke_test, limit=args.limit)
+    if args.split == "dev":
+        try:
+            claims, mode = select_official_dev_claims(dataset.dev_claims, limit=args.limit)
+        except ValueError as error:
+            print(f"Official dev configuration failed: {error}", file=sys.stderr)
+            return 1
+        full_count, split_label = len(dataset.dev_claims), "official_dev"
+        split_metadata: dict[str, object] = {"source": OFFICIAL_DEV_SOURCE}
+        count_key = "full_official_dev_claim_count"
+    else:
+        validation_claims = select_internal_validation_claims(dataset.train_claims, seed=args.seed)
+        try:
+            assert_expected_internal_validation(validation_claims)
+        except ValueError as error:
+            print(f"Internal validation configuration failed: {error}", file=sys.stderr)
+            return 1
+        claims, mode = select_claims(
+            validation_claims, smoke_test=args.smoke_test, limit=args.limit
+        )
+        full_count, split_label = len(validation_claims), "internal_validation"
+        split_metadata = {"source": "Milestone 2 train-derived validation", "seed": args.seed}
+        count_key = "full_validation_claim_count"
     metadata["evaluation"] = {
         "mode": mode,
-        "split": {"source": "Milestone 2 train-derived validation", "seed": args.seed},
-        "full_validation_claim_count": len(validation_claims),
+        "split": split_metadata,
+        count_key: full_count,
         "selected_claim_ids": [claim.claim_id for claim in claims],
         "mixed_label_policy": (
             "Exclude mixed evidence labels from three-class metrics; preserve them in artifacts."
@@ -430,7 +458,8 @@ def main() -> int:
             claims,
             attempts,
             status="in_progress",
-            full_validation_count=len(validation_claims),
+            full_validation_count=full_count,
+            split_label=split_label,
         )
 
     predictions_path = run_dir / "predictions.jsonl"
@@ -451,7 +480,8 @@ def main() -> int:
                     claims,
                     attempts,
                     status="in_progress",
-                    full_validation_count=len(validation_claims),
+                    full_validation_count=full_count,
+                    split_label=split_label,
                 )
                 print(
                     f"[{len(attempts)}/{len(claims)}] claim_id={claim.claim_id} "
@@ -467,7 +497,8 @@ def main() -> int:
             claims,
             attempts,
             status="partial",
-            full_validation_count=len(validation_claims),
+            full_validation_count=full_count,
+            split_label=split_label,
         )
         _write_metrics(run_dir, claims, attempts, state)
         print(f"interrupted; resume with --resume {run_dir}", file=sys.stderr)
@@ -479,7 +510,8 @@ def main() -> int:
         claims,
         attempts,
         status="completed",
-        full_validation_count=len(validation_claims),
+        full_validation_count=full_count,
+        split_label=split_label,
     )
     metrics = _write_metrics(run_dir, claims, attempts, state)
     classification = cast(Mapping[str, object], metrics["classification"])

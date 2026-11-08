@@ -465,3 +465,30 @@ the schema and citation validation are identical. Runs record
 uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --no-verifier   --neutral-judge-wording
 uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --no-verifier   --no-challenge --neutral-judge-wording
 ```
+
+## Official dev split for the final evaluation (opt-in)
+
+All claim-verification runs default to the 162-claim seed-42 internal validation subset, which was
+used for development and prompt revision. `--split dev` evaluates the official labeled SciFact dev
+split (`claims_dev.jsonl`: 300 claims, 188 with annotated evidence, 112 without) instead. It is
+reserved for the final, frozen comparison: run each system once, with configurations fixed in
+advance, and do not revise prompts or settings after seeing its results.
+
+`--split dev` is accepted only with `--evaluate` (smoke tests stay on train-derived claims) and works
+with `--limit` and `--resume`. Claims are evaluated in stable claim-ID order, and the split's counts
+are checked before any LLM call. Runs record evaluation mode `official_dev` (or
+`partial_official_dev` with `--limit`) and the split source; the Standard and Iterative RAG run
+state reports `full_official_dev_claim_count`. Runs without `--split dev` keep their existing
+metadata unchanged.
+
+```bash
+uv run --locked python scripts/run_standard_rag.py --evaluate --split dev --output-dir outputs/dev/rag
+uv run --locked python scripts/run_iterative_rag.py --evaluate --split dev \
+  --output-dir outputs/dev/iterative_rag
+uv run --locked python scripts/run_argus.py --evaluate --split dev --judge-version v4.1 \
+  --verifier-version v2 --no-challenge --output-dir outputs/dev/argus/A
+uv run --locked python scripts/run_argus.py --evaluate --split dev --judge-version v4.1 \
+  --verifier-version v2 --output-dir outputs/dev/argus/B
+uv run --locked python scripts/run_argus.py --evaluate --split dev --judge-version v4.1 \
+  --no-verifier --neutral-judge-wording --output-dir outputs/dev/argus/B-no-verifier
+```
