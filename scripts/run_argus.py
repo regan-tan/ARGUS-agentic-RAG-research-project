@@ -69,6 +69,11 @@ def arguments() -> argparse.Namespace:
         action="store_true",
         help="Ablation: skip the Evidence Verifier; the Judge reads unverified abstracts.",
     )
+    parser.add_argument(
+        "--neutral-judge-wording",
+        action="store_true",
+        help="With --no-verifier and Judge v4/v4.1: say 'retrieved', not 'verified', evidence.",
+    )
     parser.add_argument("--challenge-retrieval", choices=tuple(CHALLENGE_METHODS), default="dense")
     parser.add_argument(
         "--challenge-query", choices=("suffix", "claim", "counter_hypothesis"), default="suffix"
@@ -129,6 +134,12 @@ def main() -> int:
     if args.no_verifier and args.verifier_version != "v1":
         print("--verifier-version cannot be combined with --no-verifier", file=sys.stderr)
         return 2
+    if args.neutral_judge_wording and (not args.no_verifier or args.judge_version == "v3"):
+        print(
+            "--neutral-judge-wording requires --no-verifier and --judge-version v4 or v4.1",
+            file=sys.stderr,
+        )
+        return 2
     config = ArgusConfig(
         retrieval_k=args.k,
         max_evidence_documents=args.max_evidence_documents,
@@ -141,6 +152,7 @@ def main() -> int:
         challenge_exclude_support=args.challenge_exclude_support,
         verifier_version=args.verifier_version,
         verifier_enabled=not args.no_verifier,
+        neutral_judge_wording=args.neutral_judge_wording,
     )
     client = OllamaChatClient(
         model=args.model,
@@ -171,13 +183,15 @@ def main() -> int:
     }[args.judge_version]
     implementation_version = (
         base_version
-        if config.variant().removesuffix("_no_verifier") in {"full", "no_challenge"}
+        if config.variant().split("_no_verifier")[0] in {"full", "no_challenge"}
         else f"{base_version}-challenge-retrieval"
     )
     if args.verifier_version == "v2":
         implementation_version = f"{implementation_version}-verifier-v2"
     if args.no_verifier:
         implementation_version = f"{implementation_version}-no-verifier"
+    if args.neutral_judge_wording:
+        implementation_version = f"{implementation_version}-neutral-judge"
     metadata = {
         "experiment": "Experiment 3 ARGUS",
         "implementation_version": implementation_version,
@@ -189,6 +203,7 @@ def main() -> int:
             args.challenge_query,
             args.verifier_version,
             verifier_enabled=not args.no_verifier,
+            neutral_judge_wording=args.neutral_judge_wording,
         ),
         "retrieval": {
             "method": "dense BGE-small plus FAISS IndexFlatIP",

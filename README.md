@@ -452,3 +452,16 @@ uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --no
 
 Compare it on the 162 internal-validation claims only. No claim that removing the Verifier helps
 or hurts ARGUS is made until runs are complete.
+
+Because the unchanged Judge prompt still calls its input "verified", `--neutral-judge-wording`
+(requires `--no-verifier` and `--judge-version v4`/`v4.1`) checks whether that wording matters.
+It swaps in a copy of the v4 Judge prompt that says "retrieved" abstracts and drops the mention of
+verifier rationales, and wraps the evidence in `<retrieved_evidence>`; every other instruction,
+the schema and citation validation are identical. Runs record
+`agent.neutral_judge_wording: true`, Judge prompt version `argus-v4-judge-unverified`, the
+`_neutral` variant suffix and `-neutral-judge` in `implementation_version`. Other runs are unaffected.
+
+```bash
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --no-verifier   --neutral-judge-wording
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --no-verifier   --no-challenge --neutral-judge-wording
+```

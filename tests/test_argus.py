@@ -16,6 +16,8 @@ from argus.agents.argus import (
     CONCISE_REASONING_INSTRUCTION,
     JUDGE_SYSTEM_PROMPT,
     JUDGE_V4_SYSTEM_PROMPT,
+    JUDGE_V4_UNVERIFIED_SYSTEM_PROMPT,
+    JUDGE_V4_UNVERIFIED_VERSION,
     JUDGE_V4_VERSION,
     MAX_JUDGE_EVIDENCE_REFERENCES,
     MAX_JUDGE_V4_EVIDENCE_REFERENCES,
@@ -550,7 +552,8 @@ class FakeOllamaClient:
             {"query": "goitre radioiodine no effect"}
             if system == CHALLENGE_QUERY_SYSTEM_PROMPT
             else {"verdict": "INSUFFICIENT", "rationale": "Not enough.", "evidence": []}
-            if system in {JUDGE_SYSTEM_PROMPT, JUDGE_V4_SYSTEM_PROMPT}
+            if system
+            in {JUDGE_SYSTEM_PROMPT, JUDGE_V4_SYSTEM_PROMPT, JUDGE_V4_UNVERIFIED_SYSTEM_PROMPT}
             else {"label": "INSUFFICIENT", "rationale": "Not direct.", "sentence_indices": []}
         )
         return OllamaChatResponse(
@@ -1399,5 +1402,101 @@ def test_cli_rejects_verifier_version_with_no_verifier(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     exit_code, _ = run_cli(monkeypatch, tmp_path, "--no-verifier", "--verifier-version", "v2")
+    assert exit_code == 2
+    assert list(tmp_path.iterdir()) == []
+
+
+# Neutral Judge wording: the no-Verifier Judge is not told its evidence was verified.
+
+
+def test_neutral_judge_prompt_only_removes_verified_wording() -> None:
+    body = JUDGE_V4_UNVERIFIED_SYSTEM_PROMPT.replace(JUDGE_V4_UNVERIFIED_VERSION, "")
+    assert "verified" not in body and "verifier" not in body
+    assert f"({JUDGE_V4_UNVERIFIED_VERSION})" in JUDGE_V4_UNVERIFIED_SYSTEM_PROMPT
+    restored = (
+        JUDGE_V4_UNVERIFIED_SYSTEM_PROMPT.replace(JUDGE_V4_UNVERIFIED_VERSION, JUDGE_V4_VERSION)
+        .replace("Use only the retrieved abstracts", "Use only independently verified abstracts")
+        .replace(
+            "The abstracts and retrieval provenance",
+            "The abstracts, verifier rationales, and retrieval provenance",
+        )
+    )
+    assert restored == JUDGE_V4_SYSTEM_PROMPT
+
+
+def test_neutral_judge_wording_changes_prompt_and_wrapper_only() -> None:
+    response = {
+        "verdict": "SUPPORT",
+        "rationale": "The abstract states the finding.",
+        "evidence": [{"doc_id": 1, "sentence_indices": [0]}],
+    }
+    plain, neutral = GeneratorStub([response]), GeneratorStub([response])
+    ArgusAgent(RetrieverStub(), plain, no_verifier_config(challenge_enabled=False)).verify("c")
+    result = ArgusAgent(
+        RetrieverStub(),
+        neutral,
+        no_verifier_config(challenge_enabled=False, neutral_judge_wording=True),
+    ).verify("c")
+
+    assert result.status == "success"
+    assert result.llm_calls == 1
+    assert neutral.systems == [JUDGE_V4_UNVERIFIED_SYSTEM_PROMPT]
+    assert neutral.schemas == plain.schemas
+    assert "<retrieved_evidence>" in neutral.users[0]
+    assert "verified_evidence" not in neutral.users[0]
+    assert neutral.users[0] == plain.users[0].replace("verified_evidence", "retrieved_evidence")
+
+
+def test_neutral_judge_wording_config_labels_and_validation() -> None:
+    config = no_verifier_config(neutral_judge_wording=True)
+    assert config.variant() == "full_no_verifier_neutral"
+    assert config.to_dict()["neutral_judge_wording"] is True
+    assert "neutral_judge_wording" not in no_verifier_config().to_dict()
+    assert "neutral_judge_wording" not in ArgusConfig().to_dict()
+    with pytest.raises(ValueError, match="neutral_judge_wording"):
+        ArgusConfig(judge_version="v4.1", neutral_judge_wording=True)
+    with pytest.raises(ValueError, match="neutral_judge_wording"):
+        ArgusConfig(verifier_enabled=False, neutral_judge_wording=True)
+
+
+def test_neutral_judge_fingerprint_differs_and_default_is_unchanged() -> None:
+    neutral = prompt_fingerprints("v4.1", verifier_enabled=False, neutral_judge_wording=True)
+    assert neutral["judge"]["version"] == JUDGE_V4_UNVERIFIED_VERSION
+    assert neutral["judge"] != prompt_fingerprints("v4.1")["judge"]
+    assert prompt_fingerprints("v4.1")["judge"]["version"] == JUDGE_V4_VERSION
+
+
+def test_cli_records_the_neutral_judge_arm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    exit_code, _ = run_cli(
+        monkeypatch,
+        tmp_path,
+        "--judge-version",
+        "v4.1",
+        "--no-verifier",
+        "--no-challenge",
+        "--neutral-judge-wording",
+    )
+    assert exit_code == 0
+    metadata = read_cli_metadata(tmp_path)
+    assert metadata["variant"] == "no_challenge_no_verifier_neutral"
+    assert (
+        metadata["implementation_version"]
+        == "argus-v4.1-citation-normalization-no-verifier-neutral-judge"
+    )
+    assert metadata["agent"]["neutral_judge_wording"] is True
+    assert metadata["prompts"]["judge"]["version"] == JUDGE_V4_UNVERIFIED_VERSION
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("--judge-version", "v4.1"),
+        ("--no-verifier",),
+    ],
+)
+def test_cli_rejects_neutral_judge_wording_without_its_prerequisites(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra: tuple[str, ...]
+) -> None:
+    exit_code, _ = run_cli(monkeypatch, tmp_path, *extra, "--neutral-judge-wording")
     assert exit_code == 2
     assert list(tmp_path.iterdir()) == []
