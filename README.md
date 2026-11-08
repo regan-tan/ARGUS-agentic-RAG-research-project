@@ -5,8 +5,8 @@ ARGUS (Adversarial Retrieval and Grounded Understanding System) is an SMU IS469 
 Milestone 3 adds the reproducible Standard RAG baseline: one dense retrieval over SciFact, one local
 Qwen inference call, and strict structured-output/citation validation. Milestone 4 adds a separate,
 bounded Single-agent Iterative RAG workflow on the same retrieval, model, and evaluation contracts,
-leaving the baseline unchanged. The project does not yet implement the multi-agent ARGUS
-Support/Challenge/Verifier/Judge system, fine-tuning, APIs, or a frontend.
+leaving the baseline unchanged. Experiment 3 adds the bounded multi-agent ARGUS
+Support/Challenge/Verifier/Judge system; fine-tuning, APIs, and a frontend are not implemented.
 
 ## Retrieval backends
 
@@ -228,6 +228,102 @@ RAG is made until both are evaluated on the same full claim set.
 
 ## Limitations and next milestone
 
+## Experiment 3: ARGUS Support/Challenge verification
+
+Experiment 3 adds a bounded LangGraph workflow for comparing full ARGUS with a controlled
+no-Challenge ablation. It keeps the SciFact corpus, pinned dense BGE/FAISS retriever, Qwen/Ollama
+model, seed-42 internal validation IDs, and failure-aware claim metrics used by the earlier runs.
+
+```text
+claim -> deterministic retrieval objective -> Support retrieval -> Challenge retrieval
+      -> provenance-preserving merge -> independent per-document verifier -> Judge verdict
+```
+
+The verifier receives the claim and one complete abstract, but never the Support/Challenge source.
+The judge receives only independently verified evidence and must pass the existing structured
+citation validator. Retrieved papers are treated as untrusted data throughout. Evidence is merged
+by original SciFact document ID, retaining `discovered_by` provenance for documents found by both
+agents. The deterministic Challenge query explicitly targets exceptions, limitations, conflicting
+findings, and alternative outcomes; it does not itself label a document as contradicting.
+
+The checked-in [`configs/argus-v3.json`](configs/argus-v3.json) records conservative defaults for
+the 8,192-token context window. Complete abstracts are never application-truncated. Ollama calls
+reported at or above the configured context window are rejected, as are malformed verifier output,
+out-of-range verifier citations, malformed judge output, and judge citations outside the verified
+document set. These conditions remain recorded failures rather than being converted to an
+`INSUFFICIENT` verdict.
+
+ARGUS v3 retains v2's 300-character, one-sentence rationale limits and adds an explicit verifier
+citation instruction: SUPPORT and CONTRADICT each require at least one valid zero-based sentence
+reference; otherwise the verifier must use INSUFFICIENT only when direct evidence is absent. The
+application remains authoritative: malformed JSON, unsupported labels, missing required citations,
+and invalid sentence offsets are rejected.
+
+Unlike v2, a validation-only failure for one abstract excludes only that abstract and records its
+document ID, raw response, error category/message, token usage, latency, and admission decision in
+the persisted trace. ARGUS continues verifying the remaining abstracts and the Judge receives only
+valid `VerifiedEvidence`. A partially verified claim may therefore produce a valid verdict; if all
+attempted verifier responses are invalid, no Judge call or fabricated verdict is produced. A run
+with no retrieved abstracts is recorded separately as a retrieval failure. Service errors,
+context-window failures, and exhausted LLM-call budgets remain claim-fatal. Existing Standard RAG
+and Iterative RAG validation behavior is unchanged.
+
+ARGUS metrics now additionally report verifier attempts, successful classifications, invalid
+responses, citation/missing-reference failures, other validation failures, excluded documents,
+partial/complete/all-invalid claim counts, each claim's verifier success ratio, and the overall
+valid-response rate. All are derived from saved traces and are available for both full and
+no-Challenge variants.
+
+After preparing the local dataset, BGE cache, and Ollama model, run a single claim or a controlled
+partial/full seed-42 evaluation:
+
+```cmd
+uv run python scripts/run_argus.py --claim "Example scientific claim"
+uv run python scripts/run_argus.py --smoke-test
+uv run python scripts/run_argus.py --smoke-test --no-challenge
+uv run python scripts/run_argus.py --evaluate --limit 5
+uv run python scripts/run_argus.py --evaluate
+uv run python scripts/run_argus.py --evaluate --no-challenge
+```
+
+For the A40 preflight after this v3 update, do not resume an `argus-v1` or `argus-v2` directory.
+Run the two five-claim variants into new output roots:
+
+```cmd
+uv run --locked python scripts/run_argus.py --smoke-test --output-dir outputs/argus-v3-smoke-full
+uv run --locked python scripts/run_argus.py --smoke-test --no-challenge --output-dir outputs/argus-v3-smoke-no-challenge
+```
+
+`--smoke-test` always selects five label-stratified claims from the seed-42 train-derived
+development pool, explicitly excluding all frozen 162 internal-validation claim IDs. It is the
+only multi-claim command intended for real-model preflight before the controlled evaluation.
+
+Evaluation predictions are append-only and fsync after every claim. Resume only the exact run
+directory; the command validates the selected IDs, seed, ARGUS variant, model digest and decoding
+settings, retriever/corpus fingerprint, agent budgets, and prompt hashes before accepting it:
+
+```cmd
+uv run python scripts/run_argus.py --evaluate --resume outputs/argus/<run-id>
+```
+
+Completed successes and failures are never rerun. Duplicate claim IDs and incompatible metadata are
+rejected. A single unterminated final JSONL fragment (for example, from an abrupt process exit) is
+ignored safely; any earlier malformed line is treated as corrupt and stops resume. `metrics.json` is
+recomputed from the authoritative saved rows after a completion or interruption.
+
+In addition to the unchanged failure-aware claim and citation metrics, ARGUS records post-inference
+gold-document recall/hit rate after Support retrieval and after all agent retrieval, unique Challenge
+documents and unique Challenge gold documents, verifier-label counts, merged-provenance counts,
+per-agent retrieval calls, per-component LLM calls/tokens/latency, and failure categories. These
+gold-based measurements are evaluation-only: neither retrieval agents, verifier nor Judge receive
+gold labels or annotations. Verifier classification is currently whole-abstract with sentence
+citations, not a sentence-rationale classifier; this limitation must be reported with the A40 run.
+
+Each invocation creates a new ignored `outputs/argus/<UTC-run-id>/` directory with metadata,
+per-claim traces/predictions, and evaluation metrics. Full GPU execution remains an explicit
+cluster run: configure the existing Ollama endpoint and exact local Qwen tag on the A40, then use
+the final command above for each variant. No GPU experiment is run by these repository checks.
+
 CPU-only Qwen inference can be slow, local quantization can affect output, a fixed context window can
 become limiting for unusually long retrieved evidence, and retrieval misses remain an upper bound on
 grounded verdict quality. SciFact's evidence annotations are benchmark labels rather than exhaustive
@@ -235,3 +331,98 @@ scientific truth. Temperature zero and pinned settings improve reproducibility b
 identical output across Ollama/runtime/hardware versions. Iterative RAG must be evaluated against the
 one-pass baseline rather than altering it. The next milestone is the multi-agent ARGUS system
 (Support/Challenge agents, Evidence Verifier, and Judge).
+
+## Challenge retrieval ablation (opt-in)
+
+By default the Challenge agent searches dense retrieval with the claim plus a fixed suffix. These
+options change only that search; Support stays on dense retrieval, and the Verifier and Judge never
+see which agent found a document:
+
+| Option | Values | Default |
+| --- | --- | --- |
+| `--challenge-retrieval` | `dense`, `bm25`, `hybrid` | `dense` |
+| `--challenge-query` | `suffix`, `claim`, `counter_hypothesis` | `suffix` |
+| `--challenge-exclude-support` | flag | off |
+
+```cmd
+uv run --locked python scripts/run_argus.py --smoke-test --challenge-retrieval bm25 --challenge-query claim
+uv run --locked python scripts/run_argus.py --evaluate --challenge-retrieval bm25 --challenge-query claim
+uv run --locked python scripts/run_argus.py --evaluate --challenge-query claim --challenge-exclude-support
+uv run --locked python scripts/run_argus.py --evaluate --challenge-retrieval hybrid --challenge-query claim --challenge-exclude-support
+uv run --locked python scripts/run_argus.py --evaluate --challenge-query counter_hypothesis
+```
+
+`counter_hypothesis` makes one extra Qwen call that sees only the claim and writes a search query
+for conflicting findings (prompt `argus-challenge-query-v1`, recorded in run metadata). The query is
+used only for searching and is never shown to the Verifier or Judge. If the call fails or its query
+is invalid, the claim fails without a verdict; there is no retry or fallback to another query. With
+`--challenge-exclude-support`, a claim can use the entire default budget of 12 model calls.
+
+`hybrid` is the existing reciprocal rank fusion of BM25 and dense rankings with its default
+settings. `--challenge-exclude-support` makes Challenge return only documents Support did not find, up to
+`--k`, so a claim verifies up to twice as many abstracts and uses more model calls. With dense
+retrieval and the claim as query, this returns Support's next-ranked documents, so treat that
+configuration as a "retrieve more" control rather than a search for counter-evidence.
+
+Without these options a run keeps its original `full` variant label. Otherwise `metadata.json`
+records a variant such as `bm25_claim`, an `implementation_version` ending in
+`-challenge-retrieval`, and the search under `retrieval.challenge`. All three are rejected with
+`--no-challenge`. No claim that these options improve ARGUS is made until runs are complete.
+
+## ARGUS v4 Judge reliability (opt-in)
+
+The original ARGUS v3 Judge, verifier, retrieval behavior, and historical outputs are preserved.
+Use `--judge-version v4` to select the separately recorded **argus-v4-judge** experiment.
+The default `--judge-version v3` retains the original behavior.
+
+Only the final Judge changes: its system prompt explicitly permits an empty evidence list for
+INSUFFICIENT when no decisive evidence exists, requires real zero-based sentence indices,
+and asks for at most three cited documents with one to three decisive sentence indices each.
+The structured schema adds citation limits, and application-side validation still rejects
+invalid references. The Evidence Verifier stays at argus-v3, and the same model, temperature,
+retrieval, 512-token completion limit, and evidence budgets are used. This is a distinct
+experimental configuration, **not a correction to any v3 prediction**.
+`configs/argus-v4-judge.json` documents the intended experiment settings; the CLI is
+authoritative (the JSON file is not automatically loaded).
+
+To validate without evaluating the held-out official development split:
+
+```bash
+uv run --locked pytest -q tests/test_argus.py
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked python scripts/run_argus.py --smoke-test --judge-version v4
+uv run --locked python scripts/run_argus.py --smoke-test --judge-version v4 --no-challenge
+```
+
+Smoke tests use the training-derived development pool, disjoint from the 162 internal-validation
+claims. When prompts are frozen, run full and no-Challenge v4 versions separately with
+`--evaluate --judge-version v4` and optionally `--no-challenge`, preferably in the same
+A40/Ollama environment as v3. Do not silently retry failed claims. Report failure-aware
+accuracy/F1, invalid outputs, citation precision and recall, calls, tokens, latency, and
+paired claim-level differences against the preserved v3 runs. The Judge fix does not
+guarantee improved factual accuracy or semantic citation faithfulness.
+
+## ARGUS Verifier v2 (opt-in)
+
+`--verifier-version v2` selects a separately recorded **argus-verifier-v2** Evidence Verifier
+prompt. The default `--verifier-version v1` keeps the original argus-v3 Verifier unchanged.
+
+Only the Verifier changes. Its prompt keeps every v1 rule and adds four checks before labelling:
+subject match (a different entity is INSUFFICIENT, not CONTRADICT), effect direction, negated
+claims ("no effect", "ineffective"), and the paper's own findings rather than background it
+overturns. The response schema and validation are unchanged. These checks come from the hand
+audit in `reports/argus/challenge-error-audit.md`.
+Runs record `agent.verifier_version`, the Verifier prompt SHA-256 under `prompts`, and an
+`implementation_version` ending in `-verifier-v2`. It combines with any Judge version and
+Challenge option:
+
+```bash
+uv run --locked python scripts/run_argus.py --smoke-test --judge-version v4.1 --verifier-version v2
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --verifier-version v2
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --verifier-version v2 \
+  --no-challenge
+```
+
+Develop and compare it on the 162 internal-validation claims only. No claim that v2 improves
+ARGUS is made until runs are complete.

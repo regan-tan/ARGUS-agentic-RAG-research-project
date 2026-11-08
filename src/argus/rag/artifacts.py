@@ -34,7 +34,7 @@ def load_prediction_records(path: Path) -> dict[str, dict[str, Any]]:
         return {}
     records: dict[str, dict[str, Any]] = {}
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
     except OSError as error:
         raise ArtifactError(f"Could not read prediction artifact {path}: {error}") from error
     for line_number, line in enumerate(lines, start=1):
@@ -43,6 +43,10 @@ def load_prediction_records(path: Path) -> dict[str, dict[str, Any]]:
         try:
             record = json.loads(line)
         except json.JSONDecodeError as error:
+            if line_number == len(lines) and not line.endswith(("\n", "\r")):
+                # A process can die mid-write. Durable writes always end in a newline, so only a
+                # final unterminated fragment is safely ignorable; all other corruption is fatal.
+                break
             raise ArtifactError(
                 f"Prediction artifact {path} has invalid JSON on line {line_number}: {error.msg}"
             ) from error

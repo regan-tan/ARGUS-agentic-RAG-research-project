@@ -279,6 +279,12 @@ def test_resume_artifacts_reject_duplicate_claims_and_configuration_mismatch(
         )
 
 
+def test_resume_recovers_only_an_unterminated_final_jsonl_fragment(tmp_path: Path) -> None:
+    predictions = tmp_path / "predictions.jsonl"
+    predictions.write_text('{"claim_id": 1, "status": "success"}\n{"claim_id": 2', encoding="utf-8")
+    assert set(load_prediction_records(predictions)) == {"1"}
+
+
 def test_resume_checkpoint_does_not_repeat_completed_stubbed_inference(tmp_path: Path) -> None:
     predictions = tmp_path / "predictions.jsonl"
     valid_json = (
