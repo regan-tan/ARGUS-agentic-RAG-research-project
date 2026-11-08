@@ -10,14 +10,17 @@ from .retrieval import (
     summarize_metrics,
 )
 from .verification import (
+    OFFICIAL_DEV_SOURCE,
     assert_expected_internal_validation,
     derive_gold_verdict,
     evaluate_verification_attempts,
     select_internal_validation_claims,
+    select_official_dev_claims,
     select_smoke_claims,
 )
 
 __all__ = [
+    "OFFICIAL_DEV_SOURCE",
     "InternalSplit",
     "MetricSummary",
     "assert_expected_internal_validation",
@@ -27,6 +30,7 @@ __all__ = [
     "gold_document_ids",
     "make_internal_split",
     "select_internal_validation_claims",
+    "select_official_dev_claims",
     "select_smoke_claims",
     "summarize_by_category",
     "summarize_metrics",
