@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import random
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from argus.data.models import Claim, EvidenceLabel
@@ -94,6 +95,31 @@ def gold_document_ids(claim: Claim) -> frozenset[str]:
     if claim.evidence is None:
         raise ValueError("Gold evidence is unavailable for unlabeled claims")
     return frozenset(claim.evidence)
+
+
+def reciprocal_rank(ranked_ids: Sequence[str], gold_ids: Collection[str]) -> float:
+    """Return 1/rank of the first gold document in ``ranked_ids``, or 0.0 if none occurs."""
+
+    for position, doc_id in enumerate(ranked_ids, start=1):
+        if doc_id in gold_ids:
+            return 1.0 / position
+    return 0.0
+
+
+def ndcg_at_k(ranked_ids: Sequence[str], gold_ids: Collection[str], k: int) -> float:
+    """Binary-relevance nDCG@k; the ideal ranking places min(|gold|, k) gold documents first."""
+
+    if k <= 0:
+        raise ValueError("k must be a positive integer")
+    if not gold_ids:
+        raise ValueError("nDCG requires at least one gold document")
+    dcg = sum(
+        1.0 / math.log2(position + 1)
+        for position, doc_id in enumerate(ranked_ids[:k], start=1)
+        if doc_id in gold_ids
+    )
+    ideal = sum(1.0 / math.log2(position + 1) for position in range(1, min(len(gold_ids), k) + 1))
+    return dcg / ideal
 
 
 def summarize_metrics(

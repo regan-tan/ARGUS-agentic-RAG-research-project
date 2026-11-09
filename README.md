@@ -492,3 +492,17 @@ uv run --locked python scripts/run_argus.py --evaluate --split dev --judge-versi
 uv run --locked python scripts/run_argus.py --evaluate --split dev --judge-version v4.1 \
   --no-verifier --neutral-judge-wording --output-dir outputs/dev/argus/B-no-verifier
 ```
+
+## Offline run analysis
+
+`scripts/analyze_runs.py` reads finished runs' `predictions.jsonl` files and makes no model or
+retrieval calls. For each run it reports agent steps (LLM plus retrieval calls), LLM-call success,
+stop reasons, cost per correct claim, MRR@k/nDCG@k/Recall@k/Hit@k of the first retrieval, how
+often gold abstracts reached the verdict stage, and a heuristic attribution of each wrong claim to
+the earliest stage that explains it (invalid output, retrieval, Verifier or final verdict call).
+Results go to a new `outputs/analysis/<UTC-run-id>/analysis.json`.
+
+```bash
+uv run --locked python scripts/analyze_runs.py --split dev \
+  --run "Standard RAG=outputs/dev/rag/<run-id>" --run "ARGUS B=outputs/dev/argus/B/<run-id>"
+```
