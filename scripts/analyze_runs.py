@@ -12,7 +12,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from argus.data.scifact import SciFactDataError, load_claims
-from argus.evaluation.run_analysis import FAILURE_CATEGORIES, RunAnalysisError, analyze_run
+from argus.evaluation.run_analysis import (
+    FAILURE_CATEGORIES,
+    SCORING_RULES,
+    RunAnalysisError,
+    analyze_run,
+)
 
 SPLIT_FILES = {"dev": "claims_dev.jsonl", "train": "claims_train.jsonl"}
 
@@ -78,6 +83,43 @@ def print_tables(results: dict[str, dict], k: int) -> None:
         f = result["failures"]
         counts = " | ".join(str(f["by_category"][category]) for category in FAILURE_CATEGORIES)
         print(f"| {name} | {f['wrong_claims']} | {counts} |")
+
+    print("\nVerifier on gold-annotated abstracts")
+    print(
+        "| System | Gold abstracts | Accuracy | SUPPORT recall | CONTRADICT recall "
+        "| Direction flips |"
+    )
+    for name, result in results.items():
+        v = result["verifier"]
+        if v is None:
+            continue
+        recall = v["recall_on_gold_abstracts"]
+        print(
+            f"| {name} | {v['gold_abstracts']} | {_fmt(v['accuracy_on_gold_abstracts'])} | "
+            f"{_fmt(recall['SUPPORT'])} | {_fmt(recall['CONTRADICT'])} | "
+            f"{v['direction_flips_on_gold_abstracts']} |"
+        )
+
+    print("\nAccuracy under alternative scoring rules")
+    print("| System | " + " | ".join(SCORING_RULES) + " |")
+    for name, result in results.items():
+        cells = " | ".join(
+            _fmt(result["scoring_rules"][rule]["accuracy"]) for rule in SCORING_RULES
+        )
+        print(f"| {name} | {cells} |")
+
+    print("\nChallenge-only abstracts")
+    print("| System | Claims | Abstracts | Gold | Only Challenge found gold | Verifier labels |")
+    for name, result in results.items():
+        c = result["challenge_evidence"]
+        if c is None:
+            continue
+        print(
+            f"| {name} | {c['claims_with_challenge_only_abstracts']} | "
+            f"{c['challenge_only_abstracts']} | {c['challenge_only_gold_abstracts']} | "
+            f"{c['claims_where_only_challenge_found_gold']} | "
+            f"{c['verifier_labels_on_challenge_only_abstracts']} |"
+        )
 
 
 def main() -> int:

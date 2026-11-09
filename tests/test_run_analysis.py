@@ -13,9 +13,12 @@ from argus.evaluation.run_analysis import (
     RunAnalysisError,
     analyze_run,
     attribute_failure,
+    summarize_challenge_evidence,
     summarize_cost,
     summarize_ranking,
+    summarize_scoring_rules,
     summarize_trajectory,
+    summarize_verifier,
 )
 
 SUPPORTED = Claim(1, "supported claim", (10,), {"10": (EvidenceAnnotation("SUPPORT", (0,)),)})
@@ -192,3 +195,81 @@ def test_analyze_run_rejects_empty_runs_and_unknown_claims() -> None:
     result = analyze_run([rag_record(), rag_record(prediction="CONTRADICT")], CLAIMS, k=2)
     assert result["failures"]["wrong_claims"] == 1
     assert result["failures"]["by_gold_label"]["SUPPORT"]["verdict"] == 1
+
+
+def test_verifier_scores_only_gold_abstracts_and_counts_direction_flips() -> None:
+    records = [
+        argus_record({10: "CONTRADICT", 30: "SUPPORT"}, prediction="CONTRADICT"),
+        argus_record({10: "SUPPORT"}, prediction="SUPPORT", evidence=(10,)),
+    ]
+    summary = summarize_verifier(records, CLAIMS)
+    assert summary is not None
+    assert summary["gold_abstracts"] == 2
+    assert summary["confusion_on_gold_abstracts"]["SUPPORT"] == {
+        "SUPPORT": 1,
+        "CONTRADICT": 1,
+        "INSUFFICIENT": 0,
+    }
+    assert summary["recall_on_gold_abstracts"]["SUPPORT"] == 0.5
+    assert summary["recall_on_gold_abstracts"]["CONTRADICT"] is None
+    assert summary["direction_flips_on_gold_abstracts"] == 1
+    # Non-gold doc 30 labelled SUPPORT is reported, not scored as wrong.
+    assert summary["non_gold_label_distribution"] == {"SUPPORT": 1}
+    assert summary["gold_precision"]["SUPPORT"] == 0.5
+    assert summarize_verifier([rag_record()], CLAIMS) is None
+
+
+def test_scoring_rules_change_only_invalid_outputs() -> None:
+    records = [
+        rag_record(),
+        rag_record(
+            claim_id=2,
+            gold="INSUFFICIENT",
+            prediction=None,
+            status="invalid_response",
+            raw_response='{"verdict": "SUPPORT", "evidence": []}',
+        ),
+        rag_record(prediction=None, status="invalid_json", raw_response="not json"),
+    ]
+    rules = summarize_scoring_rules(records)
+    assert rules["strict"]["correct"] == 1
+    assert rules["strict"]["scored_claims"] == 3
+    assert rules["invalid_as_insufficient"]["correct"] == 2
+    assert rules["exclude_invalid"] == {
+        "scored_claims": 1,
+        "correct": 1,
+        "accuracy": 1.0,
+        "macro_f1": pytest.approx(1 / 3),
+    }
+    # The raw verdict is recovered from the invalid response, and here it is wrong.
+    assert rules["raw_verdict"]["correct"] == 1
+
+
+def test_challenge_evidence_counts_only_challenge_discovered_abstracts() -> None:
+    record = argus_record(
+        {10: "SUPPORT", 30: "CONTRADICT", 40: "INSUFFICIENT"}, prediction="SUPPORT"
+    )
+    record["evidence"] = [
+        {"doc_id": 10, "discovered_by": ["support", "challenge"]},
+        {"doc_id": 30, "discovered_by": ["challenge"]},
+        {"doc_id": 40, "discovered_by": ["challenge"]},
+    ]
+    summary = summarize_challenge_evidence([record], CLAIMS)
+    assert summary == {
+        "claims_with_challenge_only_abstracts": 1,
+        "challenge_only_abstracts": 2,
+        "challenge_only_gold_abstracts": 0,
+        "challenge_only_gold_rate": 0.0,
+        "claims_where_only_challenge_found_gold": 0,
+        "verifier_labels_on_challenge_only_abstracts": {"CONTRADICT": 1, "INSUFFICIENT": 1},
+    }
+    record["evidence"][0]["discovered_by"] = ["support"]
+    record["evidence"][1]["doc_id"] = 10
+    record["evidence"][0]["doc_id"] = 99
+    new_gold = summarize_challenge_evidence([record], CLAIMS)
+    assert new_gold is not None
+    assert new_gold["claims_where_only_challenge_found_gold"] == 1
+    assert (
+        summarize_challenge_evidence([argus_record({10: "SUPPORT"}, prediction="SUPPORT")], CLAIMS)
+        is None
+    )

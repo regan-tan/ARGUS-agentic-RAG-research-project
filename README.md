@@ -499,7 +499,10 @@ uv run --locked python scripts/run_argus.py --evaluate --split dev --judge-versi
 retrieval calls. For each run it reports agent steps (LLM plus retrieval calls), LLM-call success,
 stop reasons, cost per correct claim, MRR@k/nDCG@k/Recall@k/Hit@k of the first retrieval, how
 often gold abstracts reached the verdict stage, and a heuristic attribution of each wrong claim to
-the earliest stage that explains it (invalid output, retrieval, Verifier or final verdict call).
+the earliest stage that explains it (invalid output, retrieval, Verifier or final verdict call). For
+ARGUS runs it also scores the Verifier's label on each gold-annotated abstract and counts what the
+Challenge agent's abstracts added. For every run it rescores accuracy under alternative rules for
+invalid outputs.
 Results go to a new `outputs/analysis/<UTC-run-id>/analysis.json`.
 
 ```bash

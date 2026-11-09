@@ -6,6 +6,7 @@ ARGUS runs already write. They make no model or retrieval calls, so they cannot 
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -296,10 +297,181 @@ def summarize_failures(
     }
 
 
+def summarize_verifier(
+    records: Sequence[PredictionRecord], claims_by_id: Mapping[str, Claim]
+) -> dict[str, Any] | None:
+    """Per-abstract Verifier labels scored against SciFact's annotated (gold) abstracts.
+
+    Only gold-annotated abstracts have a reference label, so recall and direction flips are
+    measured on those. Labels on non-gold abstracts are reported as a distribution only: SciFact
+    annotations are not exhaustive, so a SUPPORT/CONTRADICT label there is not necessarily wrong.
+    Returns ``None`` when the run has no Verifier.
+    """
+
+    if not any(uses_verifier(record) for record in records):
+        return None
+    confusion = {gold: Counter[str]() for gold in sorted(EVIDENCE_LABELS)}
+    non_gold: Counter[str] = Counter()
+    labelled: Counter[str] = Counter()
+    labelled_matching_gold: Counter[str] = Counter()
+    mixed_gold = 0
+    for record in records:
+        gold_labels = _gold_document_labels(_claim_for(record, claims_by_id))
+        for item in record.get("verified_evidence") or ():
+            doc_id = canonical_document_id(item["doc_id"])
+            label = str(item["label"])
+            labelled[label] += 1
+            gold = gold_labels.get(doc_id)
+            if gold is None:
+                non_gold[label] += 1
+                continue
+            if len(gold) != 1:
+                mixed_gold += 1
+                continue
+            (gold_label,) = gold
+            confusion[gold_label][label] += 1
+            labelled_matching_gold[label] += int(label == gold_label)
+    gold_total = sum(sum(row.values()) for row in confusion.values())
+    flips = confusion["SUPPORT"]["CONTRADICT"] + confusion["CONTRADICT"]["SUPPORT"]
+    return {
+        "gold_abstracts": gold_total,
+        "excluded_mixed_gold_abstracts": mixed_gold,
+        "confusion_on_gold_abstracts": {
+            gold: {label: row[label] for label in ("SUPPORT", "CONTRADICT", "INSUFFICIENT")}
+            for gold, row in confusion.items()
+        },
+        "recall_on_gold_abstracts": {
+            gold: row[gold] / sum(row.values()) if sum(row.values()) else None
+            for gold, row in confusion.items()
+        },
+        "accuracy_on_gold_abstracts": (
+            sum(row[gold] for gold, row in confusion.items()) / gold_total if gold_total else None
+        ),
+        "direction_flips_on_gold_abstracts": flips,
+        "direction_flip_rate_on_gold_abstracts": flips / gold_total if gold_total else None,
+        "gold_precision": {
+            label: labelled_matching_gold[label] / labelled[label] if labelled[label] else None
+            for label in sorted(EVIDENCE_LABELS)
+        },
+        "non_gold_label_distribution": dict(sorted(non_gold.items())),
+    }
+
+
+SCORING_RULES = ("strict", "invalid_as_insufficient", "exclude_invalid", "raw_verdict")
+_RAW_VERDICT = re.compile(r'"verdict"\s*:\s*"(SUPPORT|CONTRADICT|INSUFFICIENT)"')
+_VERDICTS = ("SUPPORT", "CONTRADICT", "INSUFFICIENT")
+
+
+def _rescored_prediction(record: PredictionRecord, rule: str) -> str | None:
+    if record.get("status") == "success":
+        return record.get("prediction")
+    if rule == "invalid_as_insufficient":
+        return "INSUFFICIENT"
+    if rule == "raw_verdict":
+        match = _RAW_VERDICT.search(str(record.get("raw_response") or ""))
+        return match.group(1) if match else None
+    return None
+
+
+def _accuracy_and_macro_f1(pairs: Sequence[tuple[str, str | None]]) -> tuple[float, float]:
+    """Same semantics as the run metrics: a missing prediction is a false negative only."""
+
+    if not pairs:
+        return 0.0, 0.0
+    f1_values = []
+    for verdict in _VERDICTS:
+        tp = sum(gold == verdict and pred == verdict for gold, pred in pairs)
+        fp = sum(gold != verdict and pred == verdict for gold, pred in pairs)
+        fn = sum(gold == verdict and pred != verdict for gold, pred in pairs)
+        precision = tp / (tp + fp) if tp + fp else 0.0
+        recall = tp / (tp + fn) if tp + fn else 0.0
+        f1_values.append(
+            2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        )
+    accuracy = sum(gold == pred for gold, pred in pairs) / len(pairs)
+    return accuracy, sum(f1_values) / len(f1_values)
+
+
+def summarize_scoring_rules(records: Sequence[PredictionRecord]) -> dict[str, Any]:
+    """Accuracy and macro-F1 under alternative rules for invalid outputs.
+
+    ``strict`` is the reported rule (invalid = wrong). ``invalid_as_insufficient`` maps invalid
+    outputs to INSUFFICIENT; ``exclude_invalid`` drops them from the denominator;
+    ``raw_verdict`` takes the verdict string from an invalid raw response when one is present,
+    ignoring citation validation.
+    """
+
+    results = {}
+    for rule in SCORING_RULES:
+        pairs = [
+            (str(record["gold_label"]), _rescored_prediction(record, rule))
+            for record in records
+            if rule != "exclude_invalid" or record.get("status") == "success"
+        ]
+        accuracy, macro_f1 = _accuracy_and_macro_f1(pairs)
+        results[rule] = {
+            "scored_claims": len(pairs),
+            "correct": sum(gold == pred for gold, pred in pairs),
+            "accuracy": accuracy,
+            "macro_f1": macro_f1,
+        }
+    return results
+
+
+def summarize_challenge_evidence(
+    records: Sequence[PredictionRecord], claims_by_id: Mapping[str, Claim]
+) -> dict[str, Any] | None:
+    """What the Challenge agent added: abstracts that only it found, and their effect.
+
+    Returns ``None`` when no abstract in the run was discovered by the Challenge agent.
+    """
+
+    challenge_only = gold_hits = claims_with_new_gold = 0
+    verifier_labels: Counter[str] = Counter()
+    claims_with_challenge_only = 0
+    found_any = False
+    for record in records:
+        gold_labels = _gold_document_labels(_claim_for(record, claims_by_id))
+        verified = {
+            canonical_document_id(item["doc_id"]): str(item["label"])
+            for item in record.get("verified_evidence") or ()
+        }
+        support_ids = set()
+        only_ids = []
+        for item in record.get("evidence") or ():
+            discovered = set(item.get("discovered_by") or ())
+            found_any = found_any or "challenge" in discovered
+            doc_id = canonical_document_id(item["doc_id"])
+            if "support" in discovered:
+                support_ids.add(doc_id)
+            elif discovered == {"challenge"}:
+                only_ids.append(doc_id)
+        if not only_ids:
+            continue
+        claims_with_challenge_only += 1
+        challenge_only += len(only_ids)
+        new_gold = [doc_id for doc_id in only_ids if doc_id in gold_labels]
+        gold_hits += len(new_gold)
+        claims_with_new_gold += int(bool(new_gold) and not support_ids.intersection(gold_labels))
+        for doc_id in only_ids:
+            if doc_id in verified:
+                verifier_labels[verified[doc_id]] += 1
+    if not found_any:
+        return None
+    return {
+        "claims_with_challenge_only_abstracts": claims_with_challenge_only,
+        "challenge_only_abstracts": challenge_only,
+        "challenge_only_gold_abstracts": gold_hits,
+        "challenge_only_gold_rate": gold_hits / challenge_only if challenge_only else None,
+        "claims_where_only_challenge_found_gold": claims_with_new_gold,
+        "verifier_labels_on_challenge_only_abstracts": dict(sorted(verifier_labels.items())),
+    }
+
+
 def analyze_run(
     records: Sequence[PredictionRecord], claims_by_id: Mapping[str, Claim], *, k: int = 5
 ) -> dict[str, Any]:
-    """Combine the four offline analyses for one saved run."""
+    """Combine the offline analyses for one saved run."""
 
     if not records:
         raise RunAnalysisError("a run must contain at least one prediction record")
@@ -308,4 +480,7 @@ def analyze_run(
         "cost": summarize_cost(records),
         "retrieval": summarize_ranking(records, claims_by_id, k),
         "failures": summarize_failures(records, claims_by_id),
+        "verifier": summarize_verifier(records, claims_by_id),
+        "scoring_rules": summarize_scoring_rules(records),
+        "challenge_evidence": summarize_challenge_evidence(records, claims_by_id),
     }
