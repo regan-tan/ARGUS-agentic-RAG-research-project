@@ -427,3 +427,36 @@ annotation-free real-world attack. Distinct lower-ranked results are not automat
 proven semantically misleading. Include qualitative review and this limitation in the
 report. Do not assume accuracy improves, and do not replace existing clean v3 results
 with the new controlled runs. Keep Judge v4 evaluation on its own branch/PR.
+## ARGUS v4 Judge reliability (opt-in)
+
+The original ARGUS v3 Judge, verifier, retrieval behavior, and historical outputs are preserved.
+Use `--judge-version v4` to select the separately recorded **argus-v4-judge** experiment.
+The default `--judge-version v3` retains the original behavior.
+
+Only the final Judge changes: its system prompt explicitly permits an empty evidence list for
+INSUFFICIENT when no decisive evidence exists, requires real zero-based sentence indices,
+and asks for at most three cited documents with one to three decisive sentence indices each.
+The structured schema adds citation limits, and application-side validation still rejects
+invalid references. The Evidence Verifier stays at argus-v3, and the same model, temperature,
+retrieval, 512-token completion limit, and evidence budgets are used. This is a distinct
+experimental configuration, **not a correction to any v3 prediction**.
+`configs/argus-v4-judge.json` documents the intended experiment settings; the CLI is
+authoritative (the JSON file is not automatically loaded).
+
+To validate without evaluating the held-out official development split:
+
+```bash
+uv run --locked pytest -q tests/test_argus.py
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked python scripts/run_argus.py --smoke-test --judge-version v4
+uv run --locked python scripts/run_argus.py --smoke-test --judge-version v4 --no-challenge
+```
+
+Smoke tests use the training-derived development pool, disjoint from the 162 internal-validation
+claims. When prompts are frozen, run full and no-Challenge v4 versions separately with
+`--evaluate --judge-version v4` and optionally `--no-challenge`, preferably in the same
+A40/Ollama environment as v3. Do not silently retry failed claims. Report failure-aware
+accuracy/F1, invalid outputs, citation precision and recall, calls, tokens, latency, and
+paired claim-level differences against the preserved v3 runs. The Judge fix does not
+guarantee improved factual accuracy or semantic citation faithfulness.

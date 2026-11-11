@@ -9,7 +9,11 @@ import pytest
 from argus.agents.argus import (
     CONCISE_REASONING_INSTRUCTION,
     JUDGE_SYSTEM_PROMPT,
+    JUDGE_V4_SYSTEM_PROMPT,
+    JUDGE_V4_VERSION,
     MAX_JUDGE_EVIDENCE_REFERENCES,
+    MAX_JUDGE_V4_EVIDENCE_REFERENCES,
+    MAX_JUDGE_V4_SENTENCE_INDICES,
     MAX_RATIONALE_CHARS,
     PROMPT_VERSION,
     VERIFIER_SYSTEM_PROMPT,
@@ -52,9 +56,13 @@ class GeneratorStub:
     def __init__(self, responses: list[object]) -> None:
         self.responses = iter(responses)
         self.users: list[str] = []
+        self.systems: list[str] = []
+        self.schemas: list[object] = []
 
     def chat(self, *, system: str, user: str, response_schema: object) -> OllamaChatResponse:
         self.users.append(user)
+        self.systems.append(system)
+        self.schemas.append(response_schema)
         response = next(self.responses)
         return OllamaChatResponse(
             response if isinstance(response, str) else json.dumps(response),
@@ -310,3 +318,174 @@ def test_argus_metrics_keep_gold_access_post_inference_and_separate_challenge_co
     assert evidence["verification_attempts"] == 2
     assert evidence["successful_verifier_classifications"] == 2
     assert evidence["overall_verifier_valid_response_rate"] == 1.0
+
+
+def test_v4_schema_bounds_citations_without_changing_v3_or_standard() -> None:
+    v3 = judge_json_schema()
+    v4 = judge_json_schema(version="v4")
+    v4_evidence = v4["properties"]["evidence"]
+    v4_indices = v4_evidence["items"]["properties"]["sentence_indices"]
+
+    assert v3["properties"]["evidence"]["maxItems"] == MAX_JUDGE_EVIDENCE_REFERENCES
+    assert "maxItems" not in v3["properties"]["evidence"]["items"]["properties"]["sentence_indices"]
+    assert v4_evidence["maxItems"] == MAX_JUDGE_V4_EVIDENCE_REFERENCES
+    assert v4_indices["minItems"] == 1
+    assert v4_indices["maxItems"] == MAX_JUDGE_V4_SENTENCE_INDICES
+    assert "uniqueItems" not in v4_indices
+    assert "maxItems" not in response_json_schema()["properties"]["evidence"]
+
+
+def test_v4_changes_only_judge_prompt_fingerprint() -> None:
+    v3 = prompt_fingerprints()
+    v4 = prompt_fingerprints("v4")
+
+    assert v4["evidence_verifier"] == v3["evidence_verifier"]
+    assert v4["judge"]["version"] == JUDGE_V4_VERSION
+    assert v4["judge"]["system_prompt_sha256"] != v3["judge"]["system_prompt_sha256"]
+    assert "For INSUFFICIENT with no decisive evidence" in JUDGE_V4_SYSTEM_PROMPT
+
+
+def test_v4_judge_allows_empty_evidence_for_insufficient() -> None:
+    generator = GeneratorStub(
+        [
+            {"label": "INSUFFICIENT", "rationale": "Not direct evidence.", "sentence_indices": []},
+            {"verdict": "INSUFFICIENT", "rationale": "Evidence is inconclusive.", "evidence": []},
+        ]
+    )
+    result = ArgusAgent(
+        RetrieverStub(), generator, ArgusConfig(challenge_enabled=False, judge_version="v4")
+    ).verify("claim")
+
+    assert result.status == "success"
+    assert result.response is not None
+    assert result.response.evidence == ()
+    assert generator.systems[0] == VERIFIER_SYSTEM_PROMPT
+    assert generator.systems[-1] == JUDGE_V4_SYSTEM_PROMPT
+    assert generator.schemas[-1] == judge_json_schema(version="v4")
+    judge_event = next(event for event in result.trace if event.get("purpose") == "judge")
+    assert judge_event["prompt_version"] == JUDGE_V4_VERSION
+
+
+@pytest.mark.parametrize(
+    "bad_evidence",
+    [
+        [{"doc_id": 1, "sentence_indices": []}],
+        [{"doc_id": 1, "sentence_indices": [9]}],
+        [{"doc_id": 1, "sentence_indices": [0, 0, 0, 0]}],
+        [
+            {"doc_id": 1, "sentence_indices": [0]},
+            {"doc_id": 1, "sentence_indices": [0]},
+        ],
+    ],
+)
+def test_v4_judge_keeps_strict_citation_validation(
+    bad_evidence: list[dict[str, object]],
+) -> None:
+    result = ArgusAgent(
+        RetrieverStub(),
+        GeneratorStub(
+            [
+                {"label": "SUPPORT", "rationale": "Direct.", "sentence_indices": [0]},
+                {
+                    "verdict": "SUPPORT",
+                    "rationale": "Grounded.",
+                    "evidence": bad_evidence,
+                },
+            ]
+        ),
+        ArgusConfig(challenge_enabled=False, judge_version="v4"),
+    ).verify("claim")
+
+    assert result.status == "invalid_response"
+    assert result.prediction is None
+    assert result.raw_response is not None
+
+
+def test_v4_judge_truncated_json_is_recorded_without_retry() -> None:
+    generator = GeneratorStub(
+        [
+            {"label": "SUPPORT", "rationale": "Direct.", "sentence_indices": [0]},
+            '{"evidence": [{"doc_id": 1, "sentence_indices": [0]}], "rationale":',
+        ]
+    )
+    result = ArgusAgent(
+        RetrieverStub(), generator, ArgusConfig(challenge_enabled=False, judge_version="v4")
+    ).verify("claim")
+
+    assert result.status == "invalid_json"
+    assert result.prediction is None
+    assert result.llm_calls == 2
+    assert result.raw_response is not None
+    assert result.trace[-1]["purpose"] == "judge"
+
+
+class MultiSentenceRetrieverStub:
+    def retrieve(self, query: str, k: int) -> tuple[RetrievalResult, ...]:
+        doc = CorpusDocument(
+            1, "Paper 1", ("Sentence 0.", "Sentence 1.", "Sentence 2.", "Sentence 3."), False
+        )
+        return (RetrievalResult(1, 1.0, 1, doc),)
+
+
+def run_v41_citation_case(
+    evidence: list[dict[str, object]], *, version: str = "v4.1"
+) -> ArgusResult:
+    generator = GeneratorStub(
+        [
+            {"label": "SUPPORT", "rationale": "Direct.", "sentence_indices": [0]},
+            {"verdict": "SUPPORT", "rationale": "Grounded.", "evidence": evidence},
+        ]
+    )
+    return ArgusAgent(
+        MultiSentenceRetrieverStub(),
+        generator,
+        ArgusConfig(challenge_enabled=False, judge_version=version),
+    ).verify("A scientific claim")
+
+
+def test_v41_merges_distinct_sentences_from_same_document() -> None:
+    evidence = [
+        {"doc_id": 1, "sentence_indices": [0]},
+        {"doc_id": "1", "sentence_indices": [1, 2]},
+    ]
+    result = run_v41_citation_case(evidence)
+    assert result.status == "success"
+    assert result.response is not None
+    assert len(result.response.evidence) == 1
+    assert result.response.evidence[0].sentence_indices == (0, 1, 2)
+    judge = next(event for event in result.trace if event.get("purpose") == "judge")
+    assert judge["citation_normalization"]["applied"] is True
+
+
+def test_original_v4_still_rejects_duplicate_documents() -> None:
+    evidence = [
+        {"doc_id": 1, "sentence_indices": [0]},
+        {"doc_id": 1, "sentence_indices": [1]},
+    ]
+    result = run_v41_citation_case(evidence, version="v4")
+    assert result.status == "invalid_response"
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        [
+            {"doc_id": 1, "sentence_indices": [0]},
+            {"doc_id": "1", "sentence_indices": [0]},
+        ],
+        [
+            {"doc_id": 1, "sentence_indices": [0, 1]},
+            {"doc_id": 1, "sentence_indices": [2, 3]},
+        ],
+        [{"doc_id": 1, "sentence_indices": [9]}],
+        [{"doc_id": 99, "sentence_indices": [0]}],
+    ],
+)
+def test_v41_rejects_invalid_citations(evidence: list[dict[str, object]]) -> None:
+    result = run_v41_citation_case(evidence)
+    assert result.status == "invalid_response"
+
+
+def test_v41_reuses_exact_v4_prompt_and_schema() -> None:
+    assert prompt_fingerprints("v4.1") == prompt_fingerprints("v4")
+    assert judge_json_schema(version="v4.1") == judge_json_schema(version="v4")

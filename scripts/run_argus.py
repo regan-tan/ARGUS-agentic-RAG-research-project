@@ -43,6 +43,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--no-challenge", action="store_true")
+    parser.add_argument("--judge-version", choices=("v3", "v4", "v4.1"), default="v3")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--max-evidence-documents", type=int, default=10)
@@ -94,6 +95,7 @@ def main() -> int:
         max_llm_calls=args.max_llm_calls,
         challenge_enabled=not args.no_challenge,
         context_window_tokens=args.num_ctx,
+        judge_version=args.judge_version,
     )
     client = OllamaChatClient(
         model=args.model,
@@ -116,11 +118,15 @@ def main() -> int:
     agent = ArgusAgent(retriever, client, config)
     metadata = {
         "experiment": "Experiment 3 ARGUS",
-        "implementation_version": "argus-v3",
+        "implementation_version": {
+            "v3": "argus-v3",
+            "v4": "argus-v4-judge",
+            "v4.1": "argus-v4.1-citation-normalization",
+        }[args.judge_version],
         "variant": "full" if config.challenge_enabled else "no_challenge",
         "seed": args.seed,
         "agent": config.to_dict(),
-        "prompts": prompt_fingerprints(),
+        "prompts": prompt_fingerprints(args.judge_version),
         "retrieval": {
             "method": "dense BGE-small plus FAISS IndexFlatIP",
             "k": args.k,
@@ -174,7 +180,7 @@ def main() -> int:
     claim_ids = [claim.claim_id for claim in selected]
     expected_configuration = {
         "schema_version": 2,
-        "implementation_version": "argus-v3",
+        "implementation_version": metadata["implementation_version"],
         "variant": metadata["variant"],
         "evaluation": {
             "mode": evaluation_mode,
