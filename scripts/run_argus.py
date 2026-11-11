@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,12 +16,15 @@ from argus.agents.argus import (
     evaluate_argus_attempts,
     prompt_fingerprints,
 )
+from argus.data.models import CorpusDocument
 from argus.data.scifact import load_scifact_dataset
 from argus.data.validation import validate_scifact_dataset
 from argus.evaluation.verification import (
+    OFFICIAL_DEV_SOURCE,
     assert_expected_internal_validation,
     derive_gold_verdict,
     select_internal_validation_claims,
+    select_official_dev_claims,
     select_smoke_claims,
 )
 from argus.llm import DEFAULT_OLLAMA_ENDPOINT, DEFAULT_QWEN_MODEL, OllamaChatClient, OllamaError
@@ -31,7 +35,24 @@ from argus.rag.artifacts import (
     load_json_object,
     load_prediction_records,
 )
-from argus.retrieval import DEFAULT_QUERY_PREFIX, build_dense_retriever
+from argus.retrieval import DEFAULT_QUERY_PREFIX, BM25Retriever, build_dense_retriever
+from argus.retrieval.hybrid import HybridRetriever, Retriever
+
+CHALLENGE_METHODS = {
+    "dense": "dense BGE-small plus FAISS IndexFlatIP",
+    "bm25": "BM25Okapi over the shared document text",
+    "hybrid": "RRF of BM25Okapi and dense BGE-small with default candidate_pool and rrf_constant",
+}
+
+
+def build_challenge_retriever(
+    method: str, corpus: Sequence[CorpusDocument], dense: Retriever
+) -> Retriever | None:
+    """Return Challenge's own retriever, or None when it shares Support's dense retriever."""
+    if method == "dense":
+        return None
+    bm25 = BM25Retriever(corpus)
+    return bm25 if method == "bm25" else HybridRetriever(bm25, dense)
 
 
 def arguments() -> argparse.Namespace:
@@ -44,6 +65,29 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--no-challenge", action="store_true")
     parser.add_argument("--judge-version", choices=("v3", "v4", "v4.1"), default="v3")
+    parser.add_argument("--verifier-version", choices=("v1", "v2"), default="v1")
+    parser.add_argument(
+        "--no-verifier",
+        action="store_true",
+        help="Ablation: skip the Evidence Verifier; the Judge reads unverified abstracts.",
+    )
+    parser.add_argument(
+        "--neutral-judge-wording",
+        action="store_true",
+        help="With --no-verifier and Judge v4/v4.1: say 'retrieved', not 'verified', evidence.",
+    )
+    parser.add_argument("--challenge-retrieval", choices=tuple(CHALLENGE_METHODS), default="dense")
+    parser.add_argument(
+        "--challenge-query", choices=("suffix", "claim", "counter_hypothesis"), default="suffix"
+    )
+    parser.add_argument("--challenge-exclude-support", action="store_true")
+    parser.add_argument(
+        "--split",
+        choices=("internal", "dev"),
+        default="internal",
+        help="Claims for --evaluate: the seed-42 internal validation subset (default) or the "
+        "official labeled SciFact dev split, reserved for the frozen final evaluation.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--max-evidence-documents", type=int, default=10)
@@ -89,6 +133,25 @@ def main() -> int:
     if args.limit is not None and args.limit <= 0:
         print("--limit must be positive", file=sys.stderr)
         return 2
+    if args.split == "dev" and not args.evaluate:
+        print("--split dev is available only with --evaluate", file=sys.stderr)
+        return 2
+    if args.no_challenge and (
+        args.challenge_retrieval != "dense"
+        or args.challenge_query != "suffix"
+        or args.challenge_exclude_support
+    ):
+        print("--challenge-* options cannot be combined with --no-challenge", file=sys.stderr)
+        return 2
+    if args.no_verifier and args.verifier_version != "v1":
+        print("--verifier-version cannot be combined with --no-verifier", file=sys.stderr)
+        return 2
+    if args.neutral_judge_wording and (not args.no_verifier or args.judge_version == "v3"):
+        print(
+            "--neutral-judge-wording requires --no-verifier and --judge-version v4 or v4.1",
+            file=sys.stderr,
+        )
+        return 2
     config = ArgusConfig(
         retrieval_k=args.k,
         max_evidence_documents=args.max_evidence_documents,
@@ -96,6 +159,12 @@ def main() -> int:
         challenge_enabled=not args.no_challenge,
         context_window_tokens=args.num_ctx,
         judge_version=args.judge_version,
+        challenge_retrieval=args.challenge_retrieval,
+        challenge_query=args.challenge_query,
+        challenge_exclude_support=args.challenge_exclude_support,
+        verifier_version=args.verifier_version,
+        verifier_enabled=not args.no_verifier,
+        neutral_judge_wording=args.neutral_judge_wording,
     )
     client = OllamaChatClient(
         model=args.model,
@@ -112,26 +181,56 @@ def main() -> int:
         retriever, build_info = build_dense_retriever(
             dataset.corpus, cache_dir=args.cache_dir, query_prefix=DEFAULT_QUERY_PREFIX
         )
+        challenge_retriever = build_challenge_retriever(
+            args.challenge_retrieval, dataset.corpus, retriever
+        )
     except (OllamaError, ValueError, OSError) as error:
         print(f"Preflight failed: {error}", file=sys.stderr)
         return 1
-    agent = ArgusAgent(retriever, client, config)
+    agent = ArgusAgent(retriever, client, config, challenge_retriever=challenge_retriever)
+    base_version = {
+        "v3": "argus-v3",
+        "v4": "argus-v4-judge",
+        "v4.1": "argus-v4.1-citation-normalization",
+    }[args.judge_version]
+    implementation_version = (
+        base_version
+        if config.variant().split("_no_verifier")[0] in {"full", "no_challenge"}
+        else f"{base_version}-challenge-retrieval"
+    )
+    if args.verifier_version == "v2":
+        implementation_version = f"{implementation_version}-verifier-v2"
+    if args.no_verifier:
+        implementation_version = f"{implementation_version}-no-verifier"
+    if args.neutral_judge_wording:
+        implementation_version = f"{implementation_version}-neutral-judge"
     metadata = {
         "experiment": "Experiment 3 ARGUS",
-        "implementation_version": {
-            "v3": "argus-v3",
-            "v4": "argus-v4-judge",
-            "v4.1": "argus-v4.1-citation-normalization",
-        }[args.judge_version],
-        "variant": "full" if config.challenge_enabled else "no_challenge",
+        "implementation_version": implementation_version,
+        "variant": config.variant(),
         "seed": args.seed,
         "agent": config.to_dict(),
-        "prompts": prompt_fingerprints(args.judge_version),
+        "prompts": prompt_fingerprints(
+            args.judge_version,
+            args.challenge_query,
+            args.verifier_version,
+            verifier_enabled=not args.no_verifier,
+            neutral_judge_wording=args.neutral_judge_wording,
+        ),
         "retrieval": {
             "method": "dense BGE-small plus FAISS IndexFlatIP",
             "k": args.k,
             "query_prefix": DEFAULT_QUERY_PREFIX,
             "corpus_fingerprint": build_info.corpus_fingerprint,
+            "challenge": (
+                {
+                    "method": CHALLENGE_METHODS[args.challenge_retrieval],
+                    "query": args.challenge_query,
+                    "exclude_support": args.challenge_exclude_support,
+                }
+                if config.challenge_enabled
+                else None
+            ),
         },
         "generator": {
             "model": args.model,
@@ -158,25 +257,37 @@ def main() -> int:
         write_json(run_dir / "metadata.json", metadata)
         print(f"status={result.status} prediction={result.prediction} artifacts={run_dir}")
         return 0 if result.status == "success" else 1
-    validation_claims = select_internal_validation_claims(dataset.train_claims, seed=args.seed)
-    try:
-        assert_expected_internal_validation(validation_claims)
-    except ValueError as error:
-        print(str(error), file=sys.stderr)
-        return 1
-    if args.smoke_test:
-        if args.limit is not None:
-            print("--smoke-test selects exactly five claims; do not pass --limit", file=sys.stderr)
-            return 2
-        validation_ids = {str(claim.claim_id) for claim in validation_claims}
-        development_claims = tuple(
-            claim for claim in dataset.train_claims if str(claim.claim_id) not in validation_ids
-        )
-        selected = select_smoke_claims(development_claims, limit=5)
-        evaluation_mode = "internal_development_smoke_test"
+    if args.split == "dev":
+        try:
+            selected, evaluation_mode = select_official_dev_claims(
+                dataset.dev_claims, limit=args.limit
+            )
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
     else:
-        selected = validation_claims[: args.limit] if args.limit else validation_claims
-        evaluation_mode = "partial_internal_validation" if args.limit else "internal_validation"
+        validation_claims = select_internal_validation_claims(dataset.train_claims, seed=args.seed)
+        try:
+            assert_expected_internal_validation(validation_claims)
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        if args.smoke_test:
+            if args.limit is not None:
+                print(
+                    "--smoke-test selects exactly five claims; do not pass --limit",
+                    file=sys.stderr,
+                )
+                return 2
+            validation_ids = {str(claim.claim_id) for claim in validation_claims}
+            development_claims = tuple(
+                claim for claim in dataset.train_claims if str(claim.claim_id) not in validation_ids
+            )
+            selected = select_smoke_claims(development_claims, limit=5)
+            evaluation_mode = "internal_development_smoke_test"
+        else:
+            selected = validation_claims[: args.limit] if args.limit else validation_claims
+            evaluation_mode = "partial_internal_validation" if args.limit else "internal_validation"
     claim_ids = [claim.claim_id for claim in selected]
     expected_configuration = {
         "schema_version": 2,
@@ -224,7 +335,9 @@ def main() -> int:
         metadata["selected_claim_ids"] = claim_ids
         metadata["evaluation"] = {
             "mode": evaluation_mode,
-            "source": "train-derived internal development"
+            "source": OFFICIAL_DEV_SOURCE
+            if args.split == "dev"
+            else "train-derived internal development"
             if args.smoke_test
             else "seed-42 validation",
         }

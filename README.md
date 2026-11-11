@@ -427,6 +427,43 @@ annotation-free real-world attack. Distinct lower-ranked results are not automat
 proven semantically misleading. Include qualitative review and this limitation in the
 report. Do not assume accuracy improves, and do not replace existing clean v3 results
 with the new controlled runs. Keep Judge v4 evaluation on its own branch/PR.
+## Challenge retrieval ablation (opt-in)
+
+By default the Challenge agent searches dense retrieval with the claim plus a fixed suffix. These
+options change only that search; Support stays on dense retrieval, and the Verifier and Judge never
+see which agent found a document:
+
+| Option | Values | Default |
+| --- | --- | --- |
+| `--challenge-retrieval` | `dense`, `bm25`, `hybrid` | `dense` |
+| `--challenge-query` | `suffix`, `claim`, `counter_hypothesis` | `suffix` |
+| `--challenge-exclude-support` | flag | off |
+
+```cmd
+uv run --locked python scripts/run_argus.py --smoke-test --challenge-retrieval bm25 --challenge-query claim
+uv run --locked python scripts/run_argus.py --evaluate --challenge-retrieval bm25 --challenge-query claim
+uv run --locked python scripts/run_argus.py --evaluate --challenge-query claim --challenge-exclude-support
+uv run --locked python scripts/run_argus.py --evaluate --challenge-retrieval hybrid --challenge-query claim --challenge-exclude-support
+uv run --locked python scripts/run_argus.py --evaluate --challenge-query counter_hypothesis
+```
+
+`counter_hypothesis` makes one extra Qwen call that sees only the claim and writes a search query
+for conflicting findings (prompt `argus-challenge-query-v1`, recorded in run metadata). The query is
+used only for searching and is never shown to the Verifier or Judge. If the call fails or its query
+is invalid, the claim fails without a verdict; there is no retry or fallback to another query. With
+`--challenge-exclude-support`, a claim can use the entire default budget of 12 model calls.
+
+`hybrid` is the existing reciprocal rank fusion of BM25 and dense rankings with its default
+settings. `--challenge-exclude-support` makes Challenge return only documents Support did not find, up to
+`--k`, so a claim verifies up to twice as many abstracts and uses more model calls. With dense
+retrieval and the claim as query, this returns Support's next-ranked documents, so treat that
+configuration as a "retrieve more" control rather than a search for counter-evidence.
+
+Without these options a run keeps its original `full` variant label. Otherwise `metadata.json`
+records a variant such as `bm25_claim`, an `implementation_version` ending in
+`-challenge-retrieval`, and the search under `retrieval.challenge`. All three are rejected with
+`--no-challenge`. No claim that these options improve ARGUS is made until runs are complete.
+
 ## ARGUS v4 Judge reliability (opt-in)
 
 The original ARGUS v3 Judge, verifier, retrieval behavior, and historical outputs are preserved.
@@ -460,3 +497,110 @@ A40/Ollama environment as v3. Do not silently retry failed claims. Report failur
 accuracy/F1, invalid outputs, citation precision and recall, calls, tokens, latency, and
 paired claim-level differences against the preserved v3 runs. The Judge fix does not
 guarantee improved factual accuracy or semantic citation faithfulness.
+
+## ARGUS Verifier v2 (opt-in)
+
+`--verifier-version v2` selects a separately recorded **argus-verifier-v2** Evidence Verifier
+prompt. The default `--verifier-version v1` keeps the original argus-v3 Verifier unchanged.
+
+Only the Verifier changes. Its prompt keeps every v1 rule and adds four checks before labelling:
+subject match (a different entity is INSUFFICIENT, not CONTRADICT), effect direction, negated
+claims ("no effect", "ineffective"), and the paper's own findings rather than background it
+overturns. The response schema and validation are unchanged. These checks come from the hand
+audit in `reports/argus/challenge-error-audit.md`.
+Runs record `agent.verifier_version`, the Verifier prompt SHA-256 under `prompts`, and an
+`implementation_version` ending in `-verifier-v2`. It combines with any Judge version and
+Challenge option:
+
+```bash
+uv run --locked python scripts/run_argus.py --smoke-test --judge-version v4.1 --verifier-version v2
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --verifier-version v2
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --verifier-version v2 \
+  --no-challenge
+```
+
+Develop and compare it on the 162 internal-validation claims only. No claim that v2 improves
+ARGUS is made until runs are complete.
+
+## ARGUS no-Verifier ablation (opt-in)
+
+`--no-verifier` removes the Evidence Verifier to test whether it helps. Support and Challenge
+retrieval and the merge are unchanged; no Verifier call is made, and the Judge receives the merged
+abstracts directly. The Judge prompt, schema, `<verified_evidence>` wrapper and citation validation
+are unchanged so that only the Verifier is removed; each abstract simply arrives without its
+`Verification:` line. Citations are still restricted to the retrieved abstracts.
+
+This deliberately passes unverified retrieved text to the Judge, which the normal pipeline does
+not do. It is a labelled ablation for comparison with the Verifier-enabled arms, not a recommended
+configuration. `--verifier-version` cannot be combined with it.
+
+Runs record `agent.verifier_enabled: false`, omit the Verifier from `prompts`, append
+`_no_verifier` to the variant (`full_no_verifier`, `no_challenge_no_verifier`) and `-no-verifier`
+to `implementation_version`. Verifier-enabled runs keep their earlier metadata unchanged.
+
+```bash
+uv run --locked python scripts/run_argus.py --smoke-test --judge-version v4.1 --no-verifier
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --no-verifier
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --no-verifier \
+  --no-challenge
+```
+
+Compare it on the 162 internal-validation claims only. No claim that removing the Verifier helps
+or hurts ARGUS is made until runs are complete.
+
+Because the unchanged Judge prompt still calls its input "verified", `--neutral-judge-wording`
+(requires `--no-verifier` and `--judge-version v4`/`v4.1`) checks whether that wording matters.
+It swaps in a copy of the v4 Judge prompt that says "retrieved" abstracts and drops the mention of
+verifier rationales, and wraps the evidence in `<retrieved_evidence>`; every other instruction,
+the schema and citation validation are identical. Runs record
+`agent.neutral_judge_wording: true`, Judge prompt version `argus-v4-judge-unverified`, the
+`_neutral` variant suffix and `-neutral-judge` in `implementation_version`. Other runs are unaffected.
+
+```bash
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --no-verifier   --neutral-judge-wording
+uv run --locked python scripts/run_argus.py --evaluate --judge-version v4.1 --no-verifier   --no-challenge --neutral-judge-wording
+```
+
+## Official dev split for the final evaluation (opt-in)
+
+All claim-verification runs default to the 162-claim seed-42 internal validation subset, which was
+used for development and prompt revision. `--split dev` evaluates the official labeled SciFact dev
+split (`claims_dev.jsonl`: 300 claims, 188 with annotated evidence, 112 without) instead. It is
+reserved for the final, frozen comparison: run each system once, with configurations fixed in
+advance, and do not revise prompts or settings after seeing its results.
+
+`--split dev` is accepted only with `--evaluate` (smoke tests stay on train-derived claims) and works
+with `--limit` and `--resume`. Claims are evaluated in stable claim-ID order, and the split's counts
+are checked before any LLM call. Runs record evaluation mode `official_dev` (or
+`partial_official_dev` with `--limit`) and the split source; the Standard and Iterative RAG run
+state reports `full_official_dev_claim_count`. Runs without `--split dev` keep their existing
+metadata unchanged.
+
+```bash
+uv run --locked python scripts/run_standard_rag.py --evaluate --split dev --output-dir outputs/dev/rag
+uv run --locked python scripts/run_iterative_rag.py --evaluate --split dev \
+  --output-dir outputs/dev/iterative_rag
+uv run --locked python scripts/run_argus.py --evaluate --split dev --judge-version v4.1 \
+  --verifier-version v2 --no-challenge --output-dir outputs/dev/argus/A
+uv run --locked python scripts/run_argus.py --evaluate --split dev --judge-version v4.1 \
+  --verifier-version v2 --output-dir outputs/dev/argus/B
+uv run --locked python scripts/run_argus.py --evaluate --split dev --judge-version v4.1 \
+  --no-verifier --neutral-judge-wording --output-dir outputs/dev/argus/B-no-verifier
+```
+
+## Offline run analysis
+
+`scripts/analyze_runs.py` reads finished runs' `predictions.jsonl` files and makes no model or
+retrieval calls. For each run it reports agent steps (LLM plus retrieval calls), LLM-call success,
+stop reasons, cost per correct claim, MRR@k/nDCG@k/Recall@k/Hit@k of the first retrieval, how
+often gold abstracts reached the verdict stage, and a heuristic attribution of each wrong claim to
+the earliest stage that explains it (invalid output, retrieval, Verifier or final verdict call). For
+ARGUS runs it also scores the Verifier's label on each gold-annotated abstract and counts what the
+Challenge agent's abstracts added. For every run it rescores accuracy under alternative rules for
+invalid outputs.
+Results go to a new `outputs/analysis/<UTC-run-id>/analysis.json`.
+
+```bash
+uv run --locked python scripts/analyze_runs.py --split dev \
+  --run "Standard RAG=outputs/dev/rag/<run-id>" --run "ARGUS B=outputs/dev/argus/B/<run-id>"
+```
