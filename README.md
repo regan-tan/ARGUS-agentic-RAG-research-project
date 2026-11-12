@@ -493,6 +493,32 @@ uv run --locked python scripts/run_argus.py --evaluate --split dev --judge-versi
   --no-verifier --neutral-judge-wording --output-dir outputs/dev/argus/B-no-verifier
 ```
 
+## OpenAI provider (opt-in)
+
+`scripts/run_standard_rag.py`, `scripts/run_iterative_rag.py` and `scripts/run_argus.py` accept
+`--provider openai` to run the same prompts, retrieval, budgets and scoring with an OpenAI model
+through the Responses API (`src/argus/llm/openai_client.py`, standard library only). Ollama
+remains the default, and Ollama runs record the same metadata as before.
+
+Set the key in the shell; it is read from `OPENAI_API_KEY` and never written to outputs:
+
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+uv run --locked python scripts/run_argus.py --smoke-test --provider openai --judge-version v4.1 --verifier-version v2 --output-dir outputs/openai/argus/B
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--model` | `gpt-5.6-luna` | API model; the response's resolved model name is saved per call |
+| `--reasoning-effort` | `none` | Keeps hidden reasoning out of the `--num-predict` output cap; `omit` sends none |
+| `--openai-schema` | `strict` | Strict structured outputs; `loose` sends the schema without strict mode |
+| `--omit-temperature` | off | Sends no temperature, for models that reject `temperature=0` |
+| `--max-retries` | 5 | Retries for rate limits, server errors and connection errors only |
+
+Differences from the Ollama runs, recorded in `metadata.json`: no local model digest, provider-side
+precision unknown, transient errors retried, and API outputs not guaranteed identical across runs
+at temperature 0. Write OpenAI runs to separate directories such as `outputs/openai/`.
+
 ## Offline run analysis
 
 `scripts/analyze_runs.py` reads finished runs' `predictions.jsonl` files and makes no model or

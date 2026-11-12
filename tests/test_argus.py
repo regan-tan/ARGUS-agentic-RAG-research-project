@@ -590,6 +590,61 @@ def read_cli_metadata(output_dir: Path) -> dict[str, object]:
     return json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
 
 
+class FakeOpenAIClient(FakeOllamaClient):
+    def model_identity(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            digest=None, to_dict=lambda: {"provider": "openai", "model": "gpt-5.6-luna"}
+        )
+
+    def settings(self) -> dict[str, object]:
+        return {"reasoning_effort": "none", "schema_mode": "strict"}
+
+
+def test_cli_default_provider_keeps_the_ollama_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    exit_code, _ = run_cli(monkeypatch, tmp_path, "--k", "1")
+    assert exit_code == 0
+    generator = read_cli_metadata(tmp_path)["generator"]
+    assert generator["model"] == "qwen3:4b-instruct-2507-q4_K_M"
+    assert generator["ollama"] == {"digest": "fake-digest"}
+    assert "provider" not in generator
+
+
+def test_cli_records_the_openai_provider(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = _load_cli_module()
+    monkeypatch.setattr(module, "OpenAIChatClient", FakeOpenAIClient)
+    monkeypatch.setattr(module, "OllamaChatClient", None)  # must not be used
+    corpus = (CorpusDocument(2, "Radioiodine goitre", ("Radioiodine reduces goitre.",), False),)
+    monkeypatch.setattr(module, "load_scifact_dataset", lambda _: SimpleNamespace(corpus=corpus))
+    monkeypatch.setattr(module, "validate_scifact_dataset", lambda _: None)
+    monkeypatch.setattr(
+        module,
+        "build_dense_retriever",
+        lambda *_, **__: (RecordingRetriever(2), SimpleNamespace(corpus_fingerprint="fp")),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_argus.py",
+            "--claim",
+            "Radioiodine goitre",
+            "--output-dir",
+            str(tmp_path),
+            "--k",
+            "1",
+            "--provider",
+            "openai",
+        ],
+    )
+    assert module.main() == 0
+    generator = read_cli_metadata(tmp_path)["generator"]
+    assert generator["provider"] == "openai"
+    assert generator["model"] == "gpt-5.6-luna"
+    assert generator["openai"] == {"provider": "openai", "model": "gpt-5.6-luna"}
+    assert "ollama" not in generator
+
+
 def test_cli_records_the_bm25_claim_arm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     exit_code, module = run_cli(
         monkeypatch,

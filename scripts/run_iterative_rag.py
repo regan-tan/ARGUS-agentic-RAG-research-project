@@ -31,7 +31,13 @@ from argus.evaluation.verification import (
     select_official_dev_claims,
     select_smoke_claims,
 )
-from argus.llm import DEFAULT_OLLAMA_ENDPOINT, DEFAULT_QWEN_MODEL, OllamaChatClient, OllamaError
+from argus.llm import OllamaChatClient, OllamaError, OpenAIChatClient, OpenAIError
+from argus.llm.providers import (
+    add_provider_arguments,
+    build_chat_client,
+    generator_identity_metadata,
+    resolve_provider_arguments,
+)
 from argus.rag.artifacts import (
     ArtifactError,
     append_prediction_record,
@@ -84,8 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", type=Path, default=Path("data/retrieval_cache"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/iterative_rag"))
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--model", default=DEFAULT_QWEN_MODEL)
-    parser.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
+    add_provider_arguments(parser)
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--num-predict", type=int, default=512)
     parser.add_argument("--num-ctx", type=int, default=8_192)
@@ -177,9 +182,9 @@ def _resume_configuration(
     generator: Mapping[str, object],
     agent: Mapping[str, object],
 ) -> dict[str, object]:
-    ollama = generator["ollama"]
-    if not isinstance(ollama, Mapping):
-        raise AssertionError("Ollama identity must be a mapping")
+    identity = generator.get("openai", generator.get("ollama"))
+    if not isinstance(identity, Mapping):
+        raise AssertionError("Generator identity must be a mapping")
     return {
         "schema_version": 1,
         "evaluation": {
@@ -200,11 +205,17 @@ def _resume_configuration(
         },
         "generator": {
             "model": generator["model"],
-            "model_digest": ollama.get("digest"),
+            "model_digest": identity.get("digest"),
             "temperature": generator["temperature"],
             "top_k": generator["top_k"],
             "num_predict": generator["num_predict"],
             "num_ctx": generator["num_ctx"],
+            # Present only for OpenAI runs, so existing Ollama runs still resume unchanged.
+            **(
+                {"provider": "openai", "openai_settings": identity.get("settings")}
+                if generator.get("provider") == "openai"
+                else {}
+            ),
         },
         "agent": dict(agent),
     }
@@ -284,18 +295,20 @@ def main() -> int:
         print(f"Invalid agent configuration: {error}", file=sys.stderr)
         return 2
 
-    client = OllamaChatClient(
-        model=args.model,
-        endpoint=args.endpoint,
+    resolve_provider_arguments(args)
+    client = build_chat_client(
+        args,
         timeout_seconds=args.timeout_seconds,
         num_predict=args.num_predict,
         num_ctx=args.num_ctx,
         top_k=args.top_k,
+        ollama_client=OllamaChatClient,
+        openai_client=OpenAIChatClient,
     )
     try:
         model_identity = client.model_identity()
-    except OllamaError as error:
-        print(f"Ollama preflight failed: {error}", file=sys.stderr)
+    except (OllamaError, OpenAIError) as error:
+        print(f"Model preflight failed: {error}", file=sys.stderr)
         return 1
     try:
         dataset = load_scifact_dataset(args.data_dir)
@@ -348,9 +361,13 @@ def main() -> int:
         },
         "generator": {
             "model": args.model,
-            "ollama": model_identity.to_dict(),
-            "quantization": "Q4_K_M (local Ollama model tag; not numerically identical to BF16)",
-            "temperature": 0.0,
+            **generator_identity_metadata(args.provider, model_identity.to_dict()),
+            "quantization": (
+                "API model; provider-side precision not disclosed"
+                if args.provider == "openai"
+                else "Q4_K_M (local Ollama model tag; not numerically identical to BF16)"
+            ),
+            "temperature": None if args.provider == "openai" and args.omit_temperature else 0.0,
             "top_k": args.top_k,
             "num_predict": args.num_predict,
             "num_ctx": args.num_ctx,
