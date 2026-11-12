@@ -27,7 +27,13 @@ from argus.evaluation.verification import (
     select_official_dev_claims,
     select_smoke_claims,
 )
-from argus.llm import DEFAULT_OLLAMA_ENDPOINT, DEFAULT_QWEN_MODEL, OllamaChatClient, OllamaError
+from argus.llm import OllamaChatClient, OllamaError, OpenAIChatClient, OpenAIError
+from argus.llm.providers import (
+    add_provider_arguments,
+    build_chat_client,
+    generator_identity_metadata,
+    resolve_provider_arguments,
+)
 from argus.rag.artifacts import (
     ArtifactError,
     append_prediction_record,
@@ -95,8 +101,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, default=Path("data/scifact"))
     parser.add_argument("--cache-dir", type=Path, default=Path("data/retrieval_cache"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/argus"))
-    parser.add_argument("--model", default=DEFAULT_QWEN_MODEL)
-    parser.add_argument("--endpoint", default=DEFAULT_OLLAMA_ENDPOINT)
+    add_provider_arguments(parser)
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--num-predict", type=int, default=512)
     parser.add_argument("--num-ctx", type=int, default=8192)
@@ -166,13 +171,15 @@ def main() -> int:
         verifier_enabled=not args.no_verifier,
         neutral_judge_wording=args.neutral_judge_wording,
     )
-    client = OllamaChatClient(
-        model=args.model,
-        endpoint=args.endpoint,
+    resolve_provider_arguments(args)
+    client = build_chat_client(
+        args,
         timeout_seconds=args.timeout_seconds,
         num_predict=args.num_predict,
         num_ctx=args.num_ctx,
         top_k=args.top_k,
+        ollama_client=OllamaChatClient,
+        openai_client=OpenAIChatClient,
     )
     try:
         identity = client.model_identity()
@@ -184,7 +191,7 @@ def main() -> int:
         challenge_retriever = build_challenge_retriever(
             args.challenge_retrieval, dataset.corpus, retriever
         )
-    except (OllamaError, ValueError, OSError) as error:
+    except (OllamaError, OpenAIError, ValueError, OSError) as error:
         print(f"Preflight failed: {error}", file=sys.stderr)
         return 1
     agent = ArgusAgent(retriever, client, config, challenge_retriever=challenge_retriever)
@@ -234,8 +241,8 @@ def main() -> int:
         },
         "generator": {
             "model": args.model,
-            "ollama": identity.to_dict(),
-            "temperature": 0,
+            **generator_identity_metadata(args.provider, identity.to_dict()),
+            "temperature": None if args.provider == "openai" and args.omit_temperature else 0,
             "top_k": args.top_k,
             "num_predict": args.num_predict,
             "num_ctx": args.num_ctx,
@@ -309,6 +316,11 @@ def main() -> int:
             "num_ctx": args.num_ctx,
         },
     }
+    if args.provider == "openai":
+        # Only OpenAI runs carry these keys, so resuming an existing Ollama run is unaffected.
+        generator_config = expected_configuration["generator"]
+        assert isinstance(generator_config, dict)
+        generator_config.update(provider="openai", openai_settings=client.settings())
     attempts: dict[str, ArgusResult] = {}
     if args.resume is not None:
         run_dir = args.resume

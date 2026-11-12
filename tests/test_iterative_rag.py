@@ -5,11 +5,12 @@ import importlib.util
 import inspect
 import json
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from argus.agents.iterative import (
+    SUFFICIENCY_SYSTEM_PROMPT,
     IterativeRAGAgent,
     IterativeRAGConfig,
     IterativeRAGResult,
@@ -454,3 +455,132 @@ def test_cli_selects_the_same_claims_as_standard_rag() -> None:
         "smoke_test",
         "partial_internal_validation",
     )
+
+
+class FakeCLIClient:
+    """Answers every iterative step; reports an Ollama identity unless subclassed."""
+
+    def __init__(self, **_: object) -> None:
+        pass
+
+    def model_identity(self) -> SimpleNamespace:
+        return SimpleNamespace(to_dict=lambda: {"digest": "fake-digest"})
+
+    def chat(self, *, system: str, user: str, response_schema: object) -> OllamaChatResponse:
+        reply = (
+            sufficient(True)
+            if system == SUFFICIENCY_SYSTEM_PROMPT
+            else json.dumps({"verdict": "INSUFFICIENT", "rationale": "Not enough.", "evidence": []})
+        )
+        return OllamaChatResponse(reply, GenerationMetadata(10, 5, None, None, None, None, 0.01))
+
+
+class FakeOpenAICLIClient(FakeCLIClient):
+    def model_identity(self) -> SimpleNamespace:
+        identity = {
+            "provider": "openai",
+            "model": "gpt-5.6-luna",
+            "digest": None,
+            "settings": {"reasoning_effort": "none", "schema_mode": "strict"},
+        }
+        return SimpleNamespace(to_dict=lambda: identity)
+
+
+class AnyQueryRetriever:
+    def retrieve(self, query: str, k: int) -> tuple[RetrievalResult, ...]:
+        return ranking(1)[:k]
+
+
+def run_iterative_cli(
+    monkeypatch: pytest.MonkeyPatch, output_dir: Path, *flags: str, openai: bool = False
+) -> dict[str, object]:
+    module = _load_cli_module()
+    if openai:
+        monkeypatch.setattr(module, "OpenAIChatClient", FakeOpenAICLIClient)
+        monkeypatch.setattr(module, "OllamaChatClient", None)  # must not be used
+    else:
+        monkeypatch.setattr(module, "OllamaChatClient", FakeCLIClient)
+        monkeypatch.setattr(module, "OpenAIChatClient", None)  # must not be used
+    dataset = SimpleNamespace(corpus=(document(1),), train_claims=())
+    monkeypatch.setattr(module, "load_scifact_dataset", lambda _: dataset)
+    monkeypatch.setattr(module, "validate_scifact_dataset", lambda _: None)
+    build_info = SimpleNamespace(
+        cache_used=True,
+        embedding_dimension=4,
+        max_sequence_length=512,
+        truncated_document_count=0,
+        corpus_fingerprint="fp",
+    )
+    monkeypatch.setattr(
+        module, "build_dense_retriever", lambda *_, **__: (AnyQueryRetriever(), build_info)
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["run_iterative_rag.py", "--claim", CLAIM, "--output-dir", str(output_dir), *flags],
+    )
+    assert module.main() == 0
+    run_dir = next(output_dir.iterdir())
+    return json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+
+
+def test_cli_default_provider_keeps_the_ollama_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    generator = run_iterative_cli(monkeypatch, tmp_path)["generator"]
+    assert generator["model"] == "qwen3:4b-instruct-2507-q4_K_M"
+    assert generator["ollama"] == {"digest": "fake-digest"}
+    assert generator["temperature"] == 0.0
+    assert "provider" not in generator
+    assert "openai" not in generator
+
+
+def test_cli_records_the_openai_provider(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    generator = run_iterative_cli(monkeypatch, tmp_path, "--provider", "openai", openai=True)[
+        "generator"
+    ]
+    assert generator["provider"] == "openai"
+    assert generator["model"] == "gpt-5.6-luna"
+    assert generator["openai"]["model"] == "gpt-5.6-luna"
+    assert generator["quantization"] == "API model; provider-side precision not disclosed"
+    assert "ollama" not in generator
+
+
+def test_resume_configuration_adds_openai_keys_only_for_openai_runs() -> None:
+    cli = _load_cli_module()
+    retrieval = {
+        key: key
+        for key in (
+            "method",
+            "initial_k",
+            "model",
+            "model_revision",
+            "query_prefix",
+            "corpus_fingerprint",
+        )
+    }
+    shared = {"model": "m", "temperature": 0.0, "top_k": 40, "num_predict": 512, "num_ctx": 8192}
+    settings = {"reasoning_effort": "none"}
+
+    def resume_generator(generator: dict[str, object]) -> dict[str, object]:
+        configuration = cli._resume_configuration(
+            mode="smoke_test",
+            claims=(),
+            seed=42,
+            retrieval=retrieval,
+            generator=generator,
+            agent={},
+        )
+        return configuration["generator"]
+
+    ollama = resume_generator({**shared, "ollama": {"digest": "d"}})
+    openai = resume_generator(
+        {**shared, "provider": "openai", "openai": {"digest": None, "settings": settings}}
+    )
+
+    assert ollama == {**shared, "model_digest": "d"}
+    assert openai == {
+        **shared,
+        "model_digest": None,
+        "provider": "openai",
+        "openai_settings": settings,
+    }
