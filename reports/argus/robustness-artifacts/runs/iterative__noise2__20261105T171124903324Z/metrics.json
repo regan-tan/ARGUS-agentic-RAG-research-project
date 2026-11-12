@@ -1,0 +1,954 @@
+{
+  "citations": {
+    "caveat": "Exact annotated document/sentence overlap is not a semantic-faithfulness judgment.",
+    "cited_documents": 232,
+    "cited_sentence_references": 265,
+    "document_precision": 0.4224137931034483,
+    "document_recall": 0.8596491228070176,
+    "gold_document_matches": 98,
+    "gold_sentence_matches": 94,
+    "invalid_or_failed_outputs": 6,
+    "sentence_precision": 0.35471698113207545,
+    "sentence_recall": 0.47959183673469385,
+    "valid_structural_citation_references": 232,
+    "valid_structured_responses": 156
+  },
+  "classification": {
+    "accuracy": 0.7407407407407407,
+    "attempted_claims": 162,
+    "confusion_matrix": {
+      "CONTRADICT": {
+        "CONTRADICT": 33,
+        "FAILURE": 1,
+        "INSUFFICIENT": 1,
+        "SUPPORT": 0
+      },
+      "INSUFFICIENT": {
+        "CONTRADICT": 13,
+        "FAILURE": 2,
+        "INSUFFICIENT": 39,
+        "SUPPORT": 7
+      },
+      "SUPPORT": {
+        "CONTRADICT": 0,
+        "FAILURE": 3,
+        "INSUFFICIENT": 15,
+        "SUPPORT": 48
+      }
+    },
+    "correct_predictions": 120,
+    "evaluated_claims": 162,
+    "excluded_mixed_gold_claims": 0,
+    "failure_policy": "Invalid, failed, and missing predictions remain in denominators as FAILURE.",
+    "macro_f1": 0.7602056792234432,
+    "mixed_label_policy": "Mixed SUPPORT/CONTRADICT gold annotations are excluded from three-class metrics and reported separately.",
+    "per_class": {
+      "CONTRADICT": {
+        "f1": 0.8148148148148148,
+        "precision": 0.717391304347826,
+        "recall": 0.9428571428571428,
+        "support": 35
+      },
+      "INSUFFICIENT": {
+        "f1": 0.6724137931034484,
+        "precision": 0.7090909090909091,
+        "recall": 0.639344262295082,
+        "support": 61
+      },
+      "SUPPORT": {
+        "f1": 0.7933884297520661,
+        "precision": 0.8727272727272727,
+        "recall": 0.7272727272727273,
+        "support": 66
+      }
+    }
+  },
+  "efficiency": {
+    "accounting_note": "Totals are derived from per-call agent traces and include every attempted retrieval and LLM call (sufficiency, query rewriting, and final verdict), including failures.",
+    "budget_exhaustion": {
+      "budget_stop_reasons": [
+        "max_evidence_documents",
+        "max_llm_calls",
+        "max_retrieval_rounds"
+      ],
+      "count": 142,
+      "rate": 0.8765432098765432
+    },
+    "claims": 162,
+    "completion_token_measurements": 922,
+    "completion_tokens_measured": 85441,
+    "distinct_evidence_documents": {
+      "max_per_claim": 14,
+      "mean_per_claim": 10.469135802469136,
+      "total_presented": 1696
+    },
+    "end_to_end_latency": {
+      "count": 162,
+      "mean_ms": 35534.79510139858,
+      "median_ms": 35356.369592482224
+    },
+    "generation_latency_per_claim": {
+      "count": 162,
+      "mean_ms": 30599.789922444703,
+      "median_ms": 30320.862439926714
+    },
+    "llm_calls": 925,
+    "llm_calls_by_purpose": {
+      "query_rewrite": 304,
+      "sufficiency": 462,
+      "verdict": 159
+    },
+    "llm_calls_per_claim_mean": 5.709876543209877,
+    "prompt_token_measurements": 922,
+    "prompt_tokens_measured": 2508215,
+    "retrieval_calls": 464,
+    "retrieval_latency_per_claim": {
+      "count": 162,
+      "mean_ms": 4928.086630568874,
+      "median_ms": 5020.951742772013
+    },
+    "retrieval_rounds_per_claim": {
+      "distribution": {
+        "1": 8,
+        "2": 6,
+        "3": 148
+      },
+      "mean": 2.8641975308641974
+    },
+    "stop_reasons": {
+      "evidence_sufficient": 13,
+      "failure": 3,
+      "max_retrieval_rounds": 142,
+      "no_new_evidence": 2,
+      "repeated_query": 2
+    }
+  },
+  "failures": {
+    "inference_failure": 3,
+    "invalid_json": 3
+  },
+  "retrieval_noise": {
+    "actual_replacements": 926,
+    "distinct_injected_document_ids": 748,
+    "per_claim": {
+      "1004": {
+        "actual_replacements": 2,
+        "requested_replacements": 2,
+        "retrieval_calls": 1
+      },
+      "1009": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1026": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1034": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1035": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1048": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1054": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1074": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1075": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1084": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1097": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1101": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1109": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1111": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1119": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1120": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1128": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1135": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1159": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1162": {
+        "actual_replacements": 2,
+        "requested_replacements": 2,
+        "retrieval_calls": 1
+      },
+      "1182": {
+        "actual_replacements": 2,
+        "requested_replacements": 2,
+        "retrieval_calls": 1
+      },
+      "1190": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "12": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1208": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1219": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1224": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1228": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1230": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1231": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1235": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1244": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1248": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1260": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1275": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1276": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1291": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1294": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1295": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1311": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1323": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1331": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1333": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1334": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1342": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1348": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1356": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1360": {
+        "actual_replacements": 4,
+        "requested_replacements": 4,
+        "retrieval_calls": 2
+      },
+      "1361": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1364": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "138": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1387": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1390": {
+        "actual_replacements": 2,
+        "requested_replacements": 2,
+        "retrieval_calls": 1
+      },
+      "14": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "1405": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "15": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "153": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "155": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "175": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "178": {
+        "actual_replacements": 2,
+        "requested_replacements": 4,
+        "retrieval_calls": 2
+      },
+      "197": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "204": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "210": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "22": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "220": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "221": {
+        "actual_replacements": 2,
+        "requested_replacements": 2,
+        "retrieval_calls": 1
+      },
+      "227": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "241": {
+        "actual_replacements": 4,
+        "requested_replacements": 4,
+        "retrieval_calls": 2
+      },
+      "242": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "244": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "245": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "255": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "26": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "265": {
+        "actual_replacements": 2,
+        "requested_replacements": 2,
+        "retrieval_calls": 1
+      },
+      "277": {
+        "actual_replacements": 4,
+        "requested_replacements": 4,
+        "retrieval_calls": 2
+      },
+      "293": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "296": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "304": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "305": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "317": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "326": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "341": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "361": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "366": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "367": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "37": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "389": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "391": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "393": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "418": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "429": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "43": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "435": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "46": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "472": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "473": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "489": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "494": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "495": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "499": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "506": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "52": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "550": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "555": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "564": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "571": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "582": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "591": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "60": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "602": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "606": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "607": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "609": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "612": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "62": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "624": {
+        "actual_replacements": 4,
+        "requested_replacements": 4,
+        "retrieval_calls": 2
+      },
+      "632": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "638": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "64": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "647": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "655": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "665": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "668": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "68": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "680": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "681": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "683": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "686": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "687": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "688": {
+        "actual_replacements": 2,
+        "requested_replacements": 2,
+        "retrieval_calls": 1
+      },
+      "69": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "709": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "714": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "717": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "734": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "737": {
+        "actual_replacements": 4,
+        "requested_replacements": 4,
+        "retrieval_calls": 2
+      },
+      "76": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "764": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "772": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "79": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "797": {
+        "actual_replacements": 2,
+        "requested_replacements": 2,
+        "retrieval_calls": 1
+      },
+      "801": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "825": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "828": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "841": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "846": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "856": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "86": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "866": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "876": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "88": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "881": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "89": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "9": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "916": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "941": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "951": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "953": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "96": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "963": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "978": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "997": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      },
+      "998": {
+        "actual_replacements": 6,
+        "requested_replacements": 6,
+        "retrieval_calls": 3
+      }
+    },
+    "requested_replacements": 928,
+    "retrieval_calls": 464,
+    "underdelivered_retrieval_calls": 2
+  },
+  "run_coverage": {
+    "completed_claims": 162,
+    "is_complete": true,
+    "selected_claims": 162
+  }
+}
